@@ -50,9 +50,13 @@ class apical_hook():
             img = cv2.imread(img_path_x, 0)
             ret1, thresh = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
             contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            for i,contour_x in enumerate(contours):
-                if len(contour_x)<5:
-                    del contours[i]
+            # Ensure it's a list
+            contours = list(contours)
+            # Filter out short contours safely
+            contours = [cnt for cnt in contours if len(cnt) >= 5]
+            # for i,contour_x in enumerate(contours):
+            #     if len(contour_x)<5:
+            #         del contours[i]
 
 
             self._cotyl_contours.append(contours)
@@ -64,9 +68,11 @@ class apical_hook():
             img = cv2.imread(img_path_x, 0)
             ret1, thresh = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
             contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            for i,contour_x in enumerate(contours):
-                if len(contour_x)<=10:
-                    del contours[i]
+            contours = list(contours)
+            contours = [cnt for cnt in contours if len(cnt) >= 5] # 26/05
+            # for i,contour_x in enumerate(contours):
+            #     if len(contour_x)<=10:
+            #         del contours[i]
 
             self._hypo_contours.append(contours)
             array_hypo = np.empty((len(contours), 1))
@@ -239,8 +245,8 @@ class apical_hook():
 
 
     """
-    The following function 
-    
+    The following function looks for stems with multiple cotyledons
+         
     """
     def angles(self):
         color=(215,138,94)
@@ -249,8 +255,7 @@ class apical_hook():
 
         filter_comb = []
         """ 
-        looks for stems with multiple cotyledons
-         Remove the cotyledons which are located on the lower region of hypocotyl, if two cotyledons are connected to the hypocotyl
+        Remove the cotyledons which are located on the lower region of hypocotyl, if two cotyledons are connected to the hypocotyl
         """
         for i1 in range(len(self._hypo_contours[0])):
             paired_to_stem = [item for item in self.matched_plant if item[0] == i1]

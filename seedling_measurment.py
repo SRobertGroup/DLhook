@@ -1,46 +1,43 @@
-from subprocess import list2cmdline
-from tkinter.ttk import Progressbar
-from models.unet_model import *
-from numpy.lib.function_base import select
-from utils.calculate_apical_hook_angle import *
-from utils.clean_on_exit import *
-
-
-from datetime import datetime
-import threading
-import json
-from utils.matching_crop2points_GUI import *
-from utils.preprocess_model_input import *
-from utils.postprocess_model_output import *
-from tkinter.filedialog import asksaveasfilename
-import tkinter as tk
-from tkinter import filedialog
-from tkinter import *
-import numpy as np
-import ast
-from PIL import Image, ImageTk
-import cv2
 import os
 import tkinter as tk
-from tkinter import filedialog
-from tkinter import *
 import numpy as np
-from PIL import Image, ImageTk
-import cv2
-import tkinter as tk
 import pandas as pd
 import shutil
 import atexit
 import sys
 
+# from subprocess import list2cmdline
+from tkinter.ttk import Progressbar, Style
+from tkinter.filedialog import asksaveasfilename, askdirectory
+from models.unet_model import *
+# from numpy.lib.function_base import select
+from utils.calculate_apical_hook_angle import *
+from utils.clean_on_exit import *
+from utils.matching_crop2points_GUI import *
+from utils.preprocess_model_input import *
+from utils.postprocess_model_output import *
 
+from datetime import datetime
+import threading
+import json
 
+import re
+
+import ast
+from PIL import Image, ImageTk
+import cv2
+
+from torchvision.transforms import functional
+import sys
+
+sys.modules["torchvision.transforms.functional_tensor"] = functional
 
 #Superres libraries 
 from models.superres.superresolution_predict import RealesrganSuperresolution
 
+
 """
-This is the graphical user interface for the X software
+This is the graphical user interface for the DLhook software
 
 
 
@@ -56,7 +53,7 @@ class Gui():
         self.path_crop='data/images/'
         self.path_save_x='data/images/'
 
-        #self.path_crop='E:/Project_seedlings/cropped_images/'
+
         self.angles=[]
         
         #List of seedling starting points
@@ -76,7 +73,7 @@ class Gui():
         self.activ_button=False
 
 
-        #The following varoables are used to controll the buttons, 
+        #The following variables are used to controll the buttons, 
         self.check_rect1=False
         self.mouse_check=False
         self.check_place_rect=False
@@ -106,81 +103,95 @@ class Gui():
         self.filenames_listbox=False
 
         self.root=root
+
+        # configure style
+        self.style = Style(self.root)
+        self.style.configure('TLabel', font=('Helvetica', 11))
+        self.style.configure('TButton', font=('Helvetica', 11))
+
+        icon_img = ImageTk.PhotoImage(file="data/logo/icon.png")
+        self.icon_img = icon_img
+        self.root.iconphoto(True, self.icon_img)
+        # self.root.iconbitmap("@data/logo/icon.xbm")
         self.root.title('DLhook')
         self.root.geometry(str(self.x_length) + "x" + str(self.y_length))
-        self.fin = Frame(self.root, width=200, height=200)
+        self.fin = tk.Frame(self.root, width=200, height=200)
         self.fin.pack()
         self.fin.place(x=0, y=0)
-        self.canvas = Canvas(self.fin, bg='#FFFFFF', width=width, height=height)
-        self.canvas.pack(side=LEFT, expand=True, fill=BOTH)
+        self.canvas = tk.Canvas(self.fin, bg='#FFFFFF', width=width, height=height)
+        self.canvas.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         self.btn_import_image = tk.Button(self.root, text="Open image directory", width=17, command=self.add_files)
 
         self.btn_import_image.place(x=width + 25, y=height - 640)
         
-        self.listbox = Listbox(self.root, width=25)
+        self.listbox = tk.Listbox(self.root, width=25)
         self.listbox.place(x=width + 10, y=height - 610)
 
         self.btn_show_image = tk.Button(self.root, text="Show image", width=10, command=self.show_image)
-        self.btn_show_image["state"]=DISABLED
+        self.btn_show_image["state"]=tk.DISABLED
         self.btn_show_image.place(x=width + 50, y=height - 440)
 
 
-        self.btn_sort = tk.Button(self.root, text="Sort images", width=10, command=self.imagename_in_sort_section)
-        self.btn_sort["state"]=DISABLED
-        self.btn_sort.place(x=width + 50, y=height - 400)
-        self.sort_txt_box = tk.Text(self.root,
-                   height = 1,
-                   width = 40)
-        self.sort_txt_box.place(x=width + 10, y=height - 370)
-        
-        self.sort_start_b=tk.Button(self.root, text="start-string->|", width=10, command=self.start_sort)
-        self.sort_start_b["state"]=DISABLED
-        self.sort_end_b=tk.Button(self.root, text="|<-end-string", width=10, command=self.end_sort)
-        self.sort_end_b["state"]=DISABLED
-        self.sort_start_b.place(x=width + 14, y=height - 340)
-        self.sort_end_b.place(x=width + 90, y=height - 340)
+        # self.btn_sort = tk.Button(self.root, text="Sort images", width=10, command=self.imagename_in_sort_section)
+        # self.btn_sort["state"]=tk.DISABLED
+        # self.btn_sort.place(x=width + 50, y=height - 400)
+        # self.sort_txt_box = tk.Text(self.root,
+        #            height = 1,
+        #            width = 40)
+        # self.sort_txt_box.place(x=width + 10, y=height - 370)
+        # 
+        # self.sort_start_b=tk.Button(self.root, text="start-string->|", width=10, command=self.start_sort)
+        # self.sort_start_b["state"]=tk.DISABLED
+        # self.sort_end_b=tk.Button(self.root, text="|<-end-string", width=10, command=self.end_sort)
+        # self.sort_end_b["state"]=tk.DISABLED
+        # self.sort_start_b.place(x=width + 14, y=height - 340)
+        # self.sort_end_b.place(x=width + 90, y=height - 340)
 
 
 
 
-        self.label_user_input = Label(self.root, 
-                  text = "User Input")
+        self.label_user_input = tk.Label(self.root, text = "User Input")
         self.label_user_input.place(x=width + 59, y=height - 305)
 
-        self.label_1 = Label(self.root, 
-                  text = "1.")
+        self.label_1 = tk.Label(self.root, text = "1.")
         self.label_1.place(x=width + 20, y=height - 277)
         self.button_place_point=tk.Button(self.root, text="Place points", width=10, command=self.canvas_circle_activate)
         self.button_place_point.place(x=width + 50, y=height - 280)
-        self.button_place_point["state"]=DISABLED
+        self.button_place_point["state"]=tk.DISABLED
 
-        self.label_2 = Label(self.root, 
-                  text = "2.")
+        self.label_2 = tk.Label(self.root, text = "2.")
         self.label_2.place(x=width + 20, y=height - 227)
         self.button_crop = tk.Button(self.root, text="Crop image", width=10, command=self.crop_image)
         self.button_crop.place(x=width + 50, y=height - 230)
-        self.button_crop["state"]=DISABLED
+        self.button_crop["state"]=tk.DISABLED
 
 
-        self.label_3 = Label(self.root, 
-                  text = "3.")
+        self.label_3 = tk.Label(self.root, text = "3.")
         self.label_3.place(x=width + 20, y=height - 177)
         self.button_start_analysis = tk.Button(self.root, text="Start Analysis", width=10, command=self._threading_analysis)
         self.button_start_analysis.place(x=width + 50, y=height - 180)
-        self.button_start_analysis["state"]=DISABLED
+        self.button_start_analysis["state"]=tk.DISABLED
 
 
 
 
 
-        self.progress = Progressbar(self.root, orient=HORIZONTAL, length=700)
+        self.progress = Progressbar(self.root, orient=tk.HORIZONTAL, length=700)
         self.progress.place(x=width - 900, y=height + 15)
-        self.progress_bar_label = Label(self.root, 
+        self.progress_bar_label = tk.Label(self.root, 
                   text = "Measurement progress:")
         self.progress_bar_label.place(x=width - 1030, y=height + 15)
 
 
-        self.debug_var=IntVar(value=1)
+        # --- Load and display the logo ---
+        logo_image = Image.open("data/logo/logos.png")
+        logo_image = logo_image.resize((140, 117), Image.ANTIALIAS)  # adjust size if needed
+        self.logo_photo = ImageTk.PhotoImage(logo_image)  # keep a reference
+
+        self.logo_label = tk.Label(self.root, image=self.logo_photo, borderwidth=0)
+        self.logo_label.place(x=width + 30, y=height - 70)  # adjust as needed
+
+        self.debug_var=tk.IntVar(value=1)
         self.check_button_debug= tk.Checkbutton(self.root, text='Debug Mode',variable=self.debug_var)
         self.check_button_debug.place(x=width + 45, y=height + 18)
         #self.button_place_point_remove=tk.Button(self.root, text="Points remove section", width=20, command=self.replace_angle)
@@ -195,130 +206,105 @@ class Gui():
 
 
     def start_sort(self):
-        self.str1=len(self.sort_txt_box.selection_get())
-    def end_sort(self):
-        str2=len(self.sort_txt_box.selection_get())
+        """Record the start index based on selection length."""
         try:
-            if self.str1==len(self.selected_image):
-                str1=0
-            else:
-                str1=self.str1
-        except:
-            str1=0
-        sorted_filenames=[]
-        sorted_filenames_output=[]
+            self.str1 = len(self.sort_txt_box.selection_get())
+            print(f"[DEBUG] Start string length (str1): {self.str1}")
+        except tk.TclError:
+            self.str1 = 0
+            print("[DEBUG] No selection made for start string.")
+
+    def end_sort(self):
+        """Sort files by number extracted from filename."""
+        print("[DEBUG] Starting end_sort...")
+
+        sorted_filenames = []
         for file in self.file_list:
-            sorted_filenames.append((int(file[str1:-str2]), file))
+            try:
+                # Remove file extension
+                base_name = os.path.splitext(file)[0]
+                # Extract number from entire base name
+                number_match = re.search(r'\d+', base_name)
+                if number_match:
+                    sort_key = int(number_match.group())
+                    sorted_filenames.append((sort_key, file))
+                else:
+                    print(f"[DEBUG] No number found in: {file}")
+            except Exception as e:
+                print(f"[DEBUG] Error processing {file}: {e}")
 
-        sorted_filenames.sort(key = lambda x: x[0])
-        for file1 in sorted_filenames:
+        sorted_filenames.sort(key=lambda x: x[0])
+        sorted_filenames_output = [file[1] for file in sorted_filenames]
 
-            sorted_filenames_output.append(file1[1])
-
+        print("[DEBUG] Sorted filenames:")
+        for f in sorted_filenames_output:
+            print(f)
 
         self.add_files(sorted_filenames_output)
-        
+        tk.messagebox.showinfo("Sorting Complete", "Image files have been successfully sorted.")
+
     def imagename_in_sort_section(self):
-        self.sort_start_b["state"]=NORMAL
-        self.sort_end_b["state"]=NORMAL
+        """Populate text box with the selected filename to extract sorting substring."""
+        # self.sort_start_b["state"] = tk.NORMAL
+        # self.sort_end_b["state"] = tk.NORMAL
 
-        clicked_file= self.listbox.curselection()
+        clicked_file = self.listbox.curselection()
         for item in clicked_file:
-            self.selected_image=self.listbox.get(item)
-            self.sort_txt_box.insert(INSERT,self.listbox.get(item))
-
-
+            self.selected_image = self.listbox.get(item)
+            self.sort_txt_box.delete("1.0", tk.END)  # Ensure clean state
+            self.sort_txt_box.insert(tk.INSERT, self.selected_image)
+            print(f"[DEBUG] Selected image for sorting reference: {self.selected_image}")
 
     def replace_angle(self):
-
-        if self.activ_button==True:
+        if self.activ_button:
             self.activate_manual_ang()
 
-        file_name=(self.images_final[self.n_angle_image])
-        org_filename=self.convert_filename(file_name)
+        file_name = self.images_final[self.n_angle_image]
+        org_filename = self.convert_filename(file_name)
 
-        clicked_file= self.listbox.curselection()
+        clicked_file = self.listbox.curselection()
         for item in clicked_file:
-            
+            data = self.listbox.get(item).split()
+            if len(data) < 2:
+                print(f"[DEBUG] Malformed listbox entry: {data}")
+                return
 
+            id_n = int(data[0])
+            new_angle = self.new_angle
 
-            data=self.listbox.get(item)
-            data=data.split(' ')
-            id_n=data[0]
-            angle=data[-1]
+            try:
+                row_id = int(self.new_df[self.new_df['img_name'] == org_filename].index.values[0])
+                self.new_df.at[row_id, id_n] = new_angle
+                print(f"[DEBUG] Updated angle for seedling {id_n} to {new_angle}")
+            except Exception as e:
+                print(f"[DEBUG] Error updating angle: {e}")
+                return
 
-            list_fill_angles=[]
-            for element in self.angle_n:
-                if int(element[0]) !=int(id_n):
-                    list_fill_angles.append(element)
-            
+        # Refresh listbox using the unified method
+        self.update_listbox_for_angles(file_name)
+    
+    def replace_angle2(self, Inp=None):
+        if self.activ_button:
+            self.activate_manual_ang()
 
-            
-            row_id=int(self.new_df[self.new_df['img_name']==org_filename].index.values[0])
-            self.new_df.at[row_id, int(id_n)]=self.new_angle
+        file_name = self.images_final[self.n_angle_image]
+        org_filename = self.convert_filename(file_name)
 
-
-            list_fill_angles.append((int(id_n), self.new_angle))
-
-            list_fill_angles=sorted(list_fill_angles, key=lambda x: x[0])
-            self.angle_n=list_fill_angles
-
-            self.listbox.delete(0, END)
-
-            for ang_n in list_fill_angles:
-                str1=f'{ang_n[0]}                              {ang_n[1]}°'
-                self.listbox.insert(END, str1)
-    def replace_angle2(self,Inp=None):
-            if self.activ_button==True:
-                self.activate_manual_ang()
-
-            file_name=(self.images_final[self.n_angle_image])
-            org_filename=self.convert_filename(file_name)
-
-            clicked_file= self.listbox.curselection()
-            for item in clicked_file:
-                
-
-  
-
-                data=self.listbox.get(item)
-                data=data.split(' ')
-                id_n=data[0]
-                angle=data[-1]
-
-                if Inp:
-                    id_n=Inp[0][0]
-                    new_angle=Inp[0][1]
-
-                    start_row=Inp[1][0]
-                    end_row=Inp[1][1]
-
-                list_fill_angles=[]
-                for element in self.angle_n:
-                    if int(element[0]) !=int(id_n):
-                        list_fill_angles.append(element)
-                
-
-
-                
-                row_id=int(self.new_df[self.new_df['img_name']==org_filename].index.values[0])
-
-                for row_id_n in range(start_row,end_row+1):
-
-                    self.new_df.at[row_id_n, int(id_n)]=new_angle
-
-                list_fill_angles.append((int(id_n), new_angle))
-
-                list_fill_angles=sorted(list_fill_angles, key=lambda x: x[0])
-                self.angle_n=list_fill_angles
-
-                self.listbox.delete(0, END)
-
-                for ang_n in list_fill_angles:
-                    str1=f'{ang_n[0]}                              {ang_n[1]}°'
-                    self.listbox.insert(END, str1)
-
-
+        if Inp:
+            id_n = int(Inp[0][0])
+            new_angle = Inp[0][1]
+            start_row = Inp[1][0]
+            end_row = Inp[1][1]
+            try:
+                for row_id_n in range(start_row, end_row + 1):
+                    self.new_df.at[row_id_n, id_n] = new_angle
+                print(f"[DEBUG] Replaced angle for seedling {id_n} from row {start_row} to {end_row} with {new_angle}")
+            except Exception as e:
+                print(f"[DEBUG] Error in replace_angle2: {e}")
+                return
+        # Refresh GUI
+        self.update_listbox_for_angles(file_name)
+    
 
     def place_angle_point(self, event):
         width=200
@@ -390,10 +376,10 @@ class Gui():
                 overhook=self.overhook_var.get()
                 if overhook==1:
                     self.new_angle=-self.new_angle
-                    self.angle_label=tk.Label(root, text =str(self.new_angle)+'°')
+                    self.angle_label=tk.Label(self.root, text =str(self.new_angle)+'°')
                     self.angle_label.place(x=width + 545, y=height + 115)
                 else:
-                    self.angle_label=tk.Label(root, text =str(self.new_angle)+'°'+' ('+str(180-self.new_angle)+'°)')
+                    self.angle_label=tk.Label(self.root, text =str(self.new_angle)+'°'+' ('+str(180-self.new_angle)+'°)')
                     self.angle_label.place(x=width + 545, y=height + 115)
 
     def del_angle_line(self):
@@ -483,7 +469,7 @@ class Gui():
             self.root.bind('<Button-1>', self.place_circle)
 
         else:
-            self.button_crop["state"]=NORMAL
+            self.button_crop["state"]=tk.NORMAL
             self.button_circle_check = False
             self.button_place_point.configure(bg="white")
             self.canvas.delete(self.added_oval)
@@ -546,14 +532,17 @@ class Gui():
 
     #deletes the square from the canvas
     def del_square(self):
-        if self.check_rect1==True:
-            self.canvas.delete(self.c1)
+        if self.check_rect1 and hasattr(self, "c1"):
+            try:
+                self.canvas.delete(self.c1)
+            except tk.TclError as e:
+                print(f"[DEBUG] Canvas delete failed: {e}")
+            self.check_rect1 = False
 
     #get mouse position for square drawing
     def move(self, event):
         self.del_square()
         self.r_x , self.r_y = event.x, event.y
-
         self.draw_square()
 
 
@@ -581,14 +570,14 @@ class Gui():
     """
     def start_analysis(self):
         #Disable all buttons while analysis is ongoing
-        self.button_crop["state"]=DISABLED
-        self.button_start_analysis["state"]=DISABLED
-        self.button_place_point["state"]=DISABLED
-        self.sort_end_b["state"]=DISABLED
-        self.sort_start_b["state"]=DISABLED
-        self.btn_show_image["state"]=DISABLED
-        self.btn_import_image["state"]=DISABLED
-        self.btn_sort["state"]=DISABLED
+        self.button_crop["state"]=tk.DISABLED
+        self.button_start_analysis["state"]=tk.DISABLED
+        self.button_place_point["state"]=tk.DISABLED
+        #self.sort_end_b["state"]=tk.DISABLED
+        #self.sort_start_b["state"]=tk.DISABLED
+        self.btn_show_image["state"]=tk.DISABLED
+        self.btn_import_image["state"]=tk.DISABLED
+        #self.btn_sort["state"]=tk.DISABLED
 
 
         #
@@ -780,9 +769,8 @@ class Gui():
 
         self.save_data()
         self.img_angle_data=img_angle_data
-        self.openNewWindow()
-
-
+        self.root.after(0, self.openNewWindow)
+        #self.openNewWindow()
 
 
     """
@@ -803,7 +791,7 @@ class Gui():
             self.root.bind("<Button-1>", self.rect_pos)
             self.mouse_check=False
             self.check_place_rect=False
-            self.button_start_analysis["state"]=NORMAL
+            self.button_start_analysis["state"]=tk.NORMAL
        
 
     #Converts the crop filename to the original filename
@@ -811,102 +799,90 @@ class Gui():
         filename_n=filename[7:-4]+self.img_format
         return(filename_n)
 
+    def update_listbox_for_angles(self, file_name):
+        """Updates image label, angle data, and listbox display for a given filename."""
+        width, height = 200, 200
+        self.listbox.delete(0, tk.END)
 
+        self.current_img_name.destroy()
+        self.current_img_name = tk.Label(self.root, text=file_name[:-4])
+        self.current_img_name.place(x=width + 500, y=height - 160)
+
+        angle_dataframe_x = self.angle_dataframe.loc[self.angle_dataframe['filename'] == file_name]
+        if angle_dataframe_x.empty:
+            print(f"[DEBUG] No angle data found for {file_name}")
+            return False  # signal: skip rendering image
+
+        org_filename = self.convert_filename(file_name)
+        tot_numb = ast.literal_eval(angle_dataframe_x['tot_numb'].tolist()[0])
+        angle_data = self.new_df.loc[self.new_df['img_name'] == org_filename]
+        angle_d = angle_data.squeeze()
+
+        self.angle_n = []
+        for seedling_id_n in tot_numb:
+            try:
+                angle = angle_d[int(seedling_id_n)]
+                if np.isnan(angle):
+                    self.angle_n.append((seedling_id_n, '-'))
+                else:
+                    self.angle_n.append((seedling_id_n, int(angle)))
+            except Exception as e:
+                print(f"[DEBUG] Error with seedling {seedling_id_n}: {e}")
+                self.angle_n.append((seedling_id_n, '-'))
+
+        print("[DEBUG] Angle list for display:")
+        for ang_n in self.angle_n:
+            print(f"{ang_n[0]}: {ang_n[1]}")
+            str1 = f'{ang_n[0]:<10}{ang_n[1]}°'
+            self.listbox.insert(tk.END, str1)
+
+        return True
 
     def next_angle_img(self):
-        width=200
-        height=200
-        self.listbox.delete(0, END)
-
-        if self.n_angle_image!=self.checker_next_img_limit-1:
-            self.n_angle_image=self.n_angle_image+1
-
-            file_name=(self.images_final[self.n_angle_image])
-            self.current_img_name.destroy()
-            self.current_img_name=tk.Label(root,text =file_name[:-4])
-            self.current_img_name.place(x=width +500,y=height - 160)
-            angle_dataframe_x=self.angle_dataframe.loc[self.angle_dataframe['filename'] == str(file_name)]
-
-
-            org_filename=self.convert_filename(file_name)
-            tot_numb=ast.literal_eval(angle_dataframe_x['tot_numb'].tolist()[0])
-            angle_data=self.new_df.loc[self.new_df['img_name']==org_filename]
-            angle_d = angle_data.squeeze()
-            
-            self.angle_n=[]
-            for seedling_id_n in tot_numb:
-                angle=(angle_d[int(seedling_id_n)])
-
-                if np.isnan(angle):
-                    self.angle_n.append((seedling_id_n,'-'))
-                else:
-                    self.angle_n.append((seedling_id_n,int(angle)))
-
-            for ang_n in self.angle_n:
-                str1=f'{ang_n[0]}                              {ang_n[1]}°'
-                self.listbox.insert(END, str1)
-            img_1=cv2.imread(self.img_final_folder+self.images_final[self.n_angle_image],1)
-            img_1=cv2.resize(img_1, (600,600))
-            photo_n = ImageTk.PhotoImage(image=Image.fromarray(img_1))
+        width, height = 200, 200
+        if self.n_angle_image != self.checker_next_img_limit - 1:
+            self.n_angle_image += 1
+            file_name = self.images_final[self.n_angle_image]
+            if not self.update_listbox_for_angles(file_name):
+                return
+            img_path = self.img_final_folder + file_name
+            img = cv2.imread(img_path, 1)
+            img = cv2.resize(img, (600, 600))
+            self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(img))
             self.canvas.delete(self.image_on_canvas)
-            self.image_on_canvas = self.canvas.create_image(0, 0, image=photo_n, anchor=tk.NW)        
-            self.root.mainloop()
-
+            self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
         else:
-            self.save_button['state']=NORMAL
-
-
+            self.save_button['state'] = tk.NORMAL
 
     def previous_angle_img(self):
-            width=200
-            height=200
-            self.listbox.delete(0, END)
-            if self.n_angle_image!=0:
-                self.n_angle_image=self.n_angle_image-1
-            if self.n_angle_image<self.checker_next_img_limit:
-                file_name=(self.images_final[self.n_angle_image])
-                self.current_img_name.destroy()
-                self.current_img_name=tk.Label(root,text =file_name[:-4])
-                self.current_img_name.place(x=width +500,y=height - 160)
-                angle_dataframe_x=self.angle_dataframe.loc[self.angle_dataframe['filename'] == str(file_name)]
+        width, height = 200, 200
+        if self.n_angle_image != 0:
+            self.n_angle_image -= 1
+        if self.n_angle_image < self.checker_next_img_limit:
+            file_name = self.images_final[self.n_angle_image]
+            if not self.update_listbox_for_angles(file_name):
+                return
+            img_path = self.img_final_folder + file_name
+            img = cv2.imread(img_path, 1)
+            img = cv2.resize(img, (600, 600))
+            self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(img))
+            self.canvas.delete(self.image_on_canvas)
+            self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
 
-
-                org_filename=self.convert_filename(file_name)
-                tot_numb=ast.literal_eval(angle_dataframe_x['tot_numb'].tolist()[0])
-                angle_data=self.new_df.loc[self.new_df['img_name']==org_filename]
-                angle_d = angle_data.squeeze()
-                
-                self.angle_n=[]
-                for seedling_id_n in tot_numb:
-                    angle=(angle_d[int(seedling_id_n)])
-
-                    if np.isnan(angle):
-                        self.angle_n.append((seedling_id_n,'-'))
-                    else:
-                        self.angle_n.append((seedling_id_n,int(angle)))
-
-                for ang_n in self.angle_n:
-                    str1=f'{ang_n[0]}                              {ang_n[1]}°'
-                    self.listbox.insert(END, str1)
-                img_1=cv2.imread(self.img_final_folder+self.images_final[self.n_angle_image],1)
-                img_1=cv2.resize(img_1, (600,600))
-                photo_n = ImageTk.PhotoImage(image=Image.fromarray(img_1))
-                self.canvas.delete(self.image_on_canvas)
-                self.image_on_canvas = self.canvas.create_image(0, 0, image=photo_n, anchor=tk.NW)        
-                self.root.mainloop()
 
     def openNewWindow(self):
         #remove buttons
         self.n_angle_image=0
         self.listbox.destroy()
         self.btn_import_image.destroy()
+        self.logo_label.destroy()
         self.btn_show_image.destroy()
         self.button_crop.destroy()
         self.button_place_point.destroy()
-        self.btn_sort.destroy()
-        self.sort_txt_box.destroy()
-        self.sort_start_b.destroy()
-        self.sort_end_b.destroy()
+        #self.btn_sort.destroy()
+        #self.sort_txt_box.destroy()
+        #self.sort_start_b.destroy()
+        #self.sort_end_b.destroy()
         self.label_user_input.destroy()
         self.label_1.destroy()
         self.label_2.destroy()
@@ -916,24 +892,18 @@ class Gui():
         self.check_button_debug.destroy()
         self.progress_bar_label.destroy()
 
-
-        
-
-
-        
-
         self.fin.destroy()
 
         width=200
         height=200
-        self.fin = Frame(self.root, width=200, height=200)
+        self.fin = tk.Frame(self.root, width=200, height=200)
         self.fin.pack()
         self.fin.place(x=20, y=20)
-        self.canvas = Canvas(self.fin, bg='#FFFFFF', width=600, height=600)
-        self.canvas.pack(side=LEFT, expand=True, fill=BOTH)
+        self.canvas = tk.Canvas(self.fin, bg='#FFFFFF', width=600, height=600)
+        self.canvas.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
 
 
-        label_rotate=tk.Label(root, text ='Cotyledon rotation')
+        label_rotate=tk.Label(self.root, text ='Cotyledon rotation')
         label_rotate.place(x=width + 463, y=height + 256)
 
         
@@ -947,26 +917,26 @@ class Gui():
         self.rotate_data={}
 
 
-        label_show_image=tk.Label(root, text ='Show prediction')
+        label_show_image=tk.Label(self.root, text ='Show prediction')
         label_show_image.place(x=width + 473, y=height + 330)
         
 
-        self.buttonNext_angle_img = tk.Button(self.root, text="→", width=4, command=self.next_angle_img)
+        self.buttonNext_angle_img = tk.Button(self.root, text="-->", width=4, command=self.next_angle_img)
         self.buttonNext_angle_img.place(x=width + 520, y=height + 355)
 
 
-        self.buttonPrevious_angle_img = tk.Button(self.root, text="←", width=4, command=self.previous_angle_img)
+        self.buttonPrevious_angle_img = tk.Button(self.root, text="<--", width=4, command=self.previous_angle_img)
         self.buttonPrevious_angle_img.place(x=width + 480, y=height + 355)
         
         self.save_button = tk.Button(self.root, text="Save data", width=15, command=self.save_csv_data)
         self.save_button.place(x=width + 460, y=height + 400)
-        self.save_button['state']=DISABLED
+        self.save_button['state']=tk.DISABLED
 
 
-        label_manual_ang=tk.Label(root, text ='Manual angle :')
+        label_manual_ang=tk.Label(self.root, text ='Manual angle :')
         label_manual_ang.place(x=width + 460, y=height + 115)
 
-        self.overhook_var=IntVar()
+        self.overhook_var=tk.IntVar()
         self.check_button_overhook= tk.Checkbutton(self.root, text='Overhook',variable=self.overhook_var)
         self.check_button_overhook.place(x=width + 460, y=height + 150)
 
@@ -976,50 +946,45 @@ class Gui():
         self.buttonReplace_angle.place(x=width + 460, y=height + 210)
 
 
-        Label_img_name = tk.Label(root,text ='Image :')
+        Label_img_name = tk.Label(self.root,text ='Image :')
         Label_img_name.place(x=width +450, y=height - 160)
 
-        Label_seedling = tk.Label(root,text ='#Seedling')
+        Label_seedling = tk.Label(self.root,text ='#Seedling')
         Label_seedling.place(x=width + 450, y=height - 120)
-        Label_seedling_angle = tk.Label(root,text ='Angle')
+        Label_seedling_angle = tk.Label(self.root,text ='Angle')
         Label_seedling_angle.place(x=width + 550, y=height - 120)
 
 
-        self.listbox = Listbox(self.root, width=22, height=12)
+        self.listbox = tk.Listbox(self.root, width=22, height=12)
         self.listbox.place(x=width + 450, y=height - 100)
         self.img_final_folder='data/final_prediction/'
         self.images_final=self.cropped_sorted_filenames
 
+
         self.checker_next_img_limit=len(self.images_final)
-
-
         self.angle_dataframe=pd.read_csv('img_angle_data.csv')
 
-        angle_dataframe_x=self.angle_dataframe.loc[self.angle_dataframe['filename'] == self.images_final[0]]
+        first_image = self.images_final[0]
 
-        self.current_img_name = tk.Label(root,text =self.images_final[0][:-4])
-        self.current_img_name.place(x=width +500,y=height - 160)
-        self.angle_n=[]
-        seed_id=eval(angle_dataframe_x['seedling_id'].tolist()[0])
-        angles=eval(angle_dataframe_x['angles'].tolist()[0])
-        tot_numb=eval(angle_dataframe_x['tot_numb'].tolist()[0])
-        for n_ang, angle_N in enumerate(angles):
-            id_x=seed_id[n_ang]
-            if id_x==None:
-                id_x=1
-            self.angle_n.append((id_x, angle_N))
-            
-        for ang_n in self.angle_n:
-            str1=f'{ang_n[0]}                              {ang_n[1]}°'
-            self.listbox.insert(END, str1)
-        img_1=cv2.imread(self.img_final_folder+self.images_final[0],1)
+        # Display image name label
+        self.current_img_name = tk.Label(self.root, text=first_image[:-4])
+        self.current_img_name.place(x=width + 500, y=height - 160)
 
-        img_1=cv2.resize(img_1, (600, 600))
-        photo_n = ImageTk.PhotoImage(image=Image.fromarray(img_1))
+        # Update listbox and angle values using shared method
+        success = self.update_listbox_for_angles(first_image)
+        if not success:
+            print(f"[DEBUG] No angle data found for {first_image}")
+            return
 
-        self.image_on_canvas = self.canvas.create_image(0, 0, image=photo_n, anchor=tk.NW)
+        # Load and display image on canvas
+        img_path = self.img_final_folder + first_image
+        img = cv2.imread(img_path, 1)
+        img = cv2.resize(img, (600, 600))
+        self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(img))
+        self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
+
         self.root.geometry("%dx%d+0+0" % (825, 650))
-        self.root.mainloop()
+        # self.root.mainloop()
 
     def save_csv_data(self):
         file_formate=[('CSV-file','*.csv')]
@@ -1097,22 +1062,21 @@ class Gui():
         for n in range(len(img_name_matrix)):
             zip_iterator = zip(main_ids[n], main_ang[n])
             a_dictionary = dict(zip_iterator)
-            self.new_df = self.new_df.append(a_dictionary, ignore_index=True)
-        
-
-
+            row_df = pd.DataFrame([a_dictionary])
+            self.new_df = pd.concat([self.new_df, row_df], ignore_index=True) # Pandas 2.0 removed method df.append(), use pd.concat()
+            #self.new_df = self.new_df.append(a_dictionary, ignore_index=True)
 
 
     def add_files(self, path_input=None):
         if path_input!=None:
             self.listbox.delete(0, tk.END)
             for file_n in path_input:
-                self.listbox.insert(END, file_n)
+                self.listbox.insert(tk.END, file_n)
             self.file_list=path_input
 
         if self.filenames_listbox==True and path_input==None:
             self.listbox.delete(0, tk.END)
-            self.path=filedialog.askdirectory()
+            self.path=askdirectory()
             folder=self.path.split('/')
             self.save_path=self.path_crop+folder[-1]
 
@@ -1122,32 +1086,53 @@ class Gui():
 
 
             for file_n in path:
-                self.listbox.insert(END, file_n)
+                self.listbox.insert(tk.END, file_n)
 
 
         if self.filenames_listbox==False and path_input==None:
             #Activate buttons
-            self.btn_show_image["state"]=NORMAL
-            self.btn_sort["state"]=NORMAL
+            self.btn_show_image["state"]=tk.NORMAL
+            #self.btn_sort["state"]=tk.NORMAL
 
 
-            self.path=filedialog.askdirectory()
+            self.path=askdirectory()
             folder=self.path.split('/')
             self.save_path=self.path_crop+folder[-1]
             self.file_list=os.listdir(self.path)
             path=sorted(os.listdir(self.path))
 
             for file_n in path:
-                self.listbox.insert(END, file_n)
+                self.listbox.insert(tk.END, file_n)
 
             self.filenames_listbox=True
+
+            # Apply sorting logic
+        sorted_filenames = []
+        for file in self.file_list:
+            base_name = os.path.splitext(file)[0]
+            number_match = re.search(r'\d+', base_name)
+            if number_match:
+                sort_key = int(number_match.group())
+                sorted_filenames.append((sort_key, file))
+            else:
+                print(f"[DEBUG] No number found in: {file}")
+    
+        sorted_filenames.sort(key=lambda x: x[0])
+        self.file_list = [f[1] for f in sorted_filenames]
+        
+            # Select and show the last image
+        if self.file_list:
+            last_index = len(self.file_list) - 1
+            self.listbox.select_set(last_index)
+            self.listbox.event_generate("<<ListboxSelect>>")
+            self.show_image()
 
         
     #Displays the image in the tkinter window 
     def show_image(self):
-        self.button_place_point["state"]=NORMAL
-        self.sort_start_b["state"]=NORMAL
-        self.sort_end_b["state"]=NORMAL
+        self.button_place_point["state"]=tk.NORMAL
+        # self.sort_start_b["state"]=tk.NORMAL
+        # self.sort_end_b["state"]=tk.NORMAL
 
         clicked_file= self.listbox.curselection()
         for item in clicked_file:
@@ -1173,8 +1158,8 @@ class Gui():
                 image_n=cv2.resize(image_n, (1100,650))
                 self.image_n2=image_n
 
-                photo_n = ImageTk.PhotoImage(image=Image.fromarray(image_n))
-                self.image_on_canvas = self.canvas.create_image(0, 0, image=photo_n, anchor=tk.NW)
+                self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(image_n))
+                self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
                 self.root.mainloop()
 
 
@@ -1191,8 +1176,8 @@ class Gui():
                 self.Ry=(650/((self.rectangle_height*2)-2))
                 image_n=cv2.resize(image_n, (1100,650))
 
-                photo_n = ImageTk.PhotoImage(image=Image.fromarray(image_n))
-                self.image_on_canvas = self.canvas.create_image(0, 0, image=photo_n, anchor=tk.NW)
+                self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(image_n))
+                self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
                 self.root.mainloop()
 
 

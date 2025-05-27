@@ -27,7 +27,7 @@ The output
 class RealesrganSuperresolution:
     #Initianlize model before prediction/image-enhancement
     def __init__(self):
-        model_path='models\superres\RealESRGAN_x4plus.pth'
+        model_path='models/superres/RealESRGAN_x4plus.pth'
 
 
 

@@ -1,51 +1,62 @@
-# DLhook - Seedling Apical Hook Phenotyping
+# DLhook
+> _High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings_
 
-The provided software is developed to measure the apical hook angle of dark grown Arabidopsis thaliana seedlings, with the intention of speeding up the tedious labor of maually measuring the apical hooks.
-The software utilizes the deep learning - convolutional neural network architecture called U-Net which was developed to segment objects in biological images. The segmentations are thereon further manipulated to yeild the apical hook angle of each seedling in the input images. 
+**Lead Development:** David Radianu, Adrien Heymans
 
-The provided deep learning model(tensorflow) comes with pre-trained weights trained on dark-grown Arabidopsis thaliana seedlings, to classify the seedlings into two separate classes; the cotyledon and the hypocotyl.
+**Contributors:** Siamsa Doyle
+
+**Coordination:** Stéphanie Robert, Sara Raggi
+
+--- 
+
+The `DLhook` software is developed to measure the apical hook angle of dark grown *Arabidopsis thaliana* seedlings, with the intention of speeding up the tedious labor of maually measuring the apical hooks.
+The software utilizes the deep learning convolutional neural network (CNN) architecture called `U-Net` which segment objects in biological images. The segmentations are thereon further manipulated to yeild the apical hook angle of each seedling in the input images of the time-series. 
+
+The provided deep learning model comes with pre-trained weights trained on dark-grown Arabidopsis thaliana seedlings, to classify the seedlings into two separate classes; the cotyledon and the hypocotyl. The used library is: [tensorflow](https://www.tensorflow.org/).
 An algorithm then uses the model outputs to extract the angles between the cotyledons and hypocotyls.
 
-Once the analysis is completed and checked, the output data is saved in a CSV/excel file. 
+Once the analysis is completed and checked, the output data is saved in a `.CSV` file.
 
+## Installation
 
+### Clone the Repository
 
-## Installation, dependencies <a name="usage"></a>
-To facilitate a smooth installation of the application we recommend that you install Anaconda Navigator from: https://www.anaconda.com/products/individual.
+```bash
+git clone https://github.com/SRobertGroup/DLhook/
+cd DLhook
+```
+### Create the virtual environment
 
+>[!NOTE] 
+> We recommend to use [Mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html) to create a virtual environment to run the software in it ([Anaconda](https://www.anaconda.com/download) works also)
+>
+> For more information on how to set-up conda, please check the [conda user guide](https://conda.io/projects/conda/en/latest/user-guide/install)
 
-<b>Step 1</b>
-When starting Anaconda Navigator we recommend that you create a new enviroment, and installing the required packages in the isolated environment. 
+```bash
+conda create -n dlhook_en python=3.10 -y 
+conda activate dlhook_env
+```
+### Install pytorch
+```bash
+pip install light-the-torch
+ltt install torch
+conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
+```
 
+# Install the following python libraries.
+```bash
+pip3 install --no-cache-dir -r requirement.txt
+```
+Once the packages are installed
 
-<b>Step 2</b>
-Upon that you can click on the newly created enviroment and click on Open Terminal
+```bash
+python main.py
+```
+This will open the application.
 
-The software requires the following python libraries. 
-The bundle of libraries can be installed by running: pip install -r requirements.txt in your shell.
+> **NOTE** You will have to enter the virtual enviroment each time you want to open the application
 
-- opencv_python==4.5.1.48
-- scikit_image==0.17.2
-- numpy==1.19.5
-- tensorflow_gpu==2.4.1
-- matplotlib==3.3.4
-- pandas==1.1.5
-- typing_extensions==3.7.4.3
-- Pillow==8.3.2
-- tensorflow==2.6.0
-
-<b>Step 3</b>
-Then you go to the directory where you have the seedling-software files in the following way on a Windows PC
-![](docs/img/install_libraries.png)
-As my seedling application folder is located at "C:\Users\David\Desktop\seedling_software" I type "cd C:\Users\David\Desktop\seedling_software" and press enter to get to the location.
-
-Thereon I type: 'pip install -r requirements.txt' in the terminal and press enter, this will install the packages in your envrioment. 
-
-
-Once the packages are installed you then type "python GUI.py" in the terminal and press enter. This will open the application. You will have to enter the Anaconda enviroment each time you want to open the application (seen in Step 2 above). This will start the apical hook application.
-
-
-## Application usage tutorial <a name="tutorial"></a>
+# Application usage tutorial <a name="tutorial"></a>
 
 The input should be a directory containing the batch of the kinematics images with ascending number-ID on in the image names, as seen in the example bellow. 
 

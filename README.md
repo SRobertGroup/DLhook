@@ -45,7 +45,7 @@ conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvi
 
 ### Install the following python libraries.
 ```bash
-pip3 install --no-cache-dir -r requirement.txt
+pip3 install --no-cache-dir -r requirements.txt
 ```
 Once the packages are installed
 

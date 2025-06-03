@@ -33,7 +33,7 @@ cd DLhook
 > For more information on how to set-up conda, please check the [conda user guide](https://conda.io/projects/conda/en/latest/user-guide/install)
 
 ```bash
-conda create -n dlhook_en python=3.10 -y 
+conda create -n dlhook_env python=3.10 -y 
 conda activate dlhook_env
 ```
 ### Install pytorch

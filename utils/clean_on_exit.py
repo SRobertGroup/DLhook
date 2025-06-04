@@ -1,15 +1,25 @@
 import os
 
-#Removes data from temporary directory on exit from the seedling software GUI
-class remove_data:
+# Cleans specific folders on exit from the seedling GUI
+class RemoveData:
     def __init__(self):
-        paths=['data/images/','data/predict/','data/postprocess/','data/final_prediction/']#,'post_main/postprocessing_1/','data/final_prediction/']
+        self.paths = [
+            'data/images/',
+            'data/predict/',
+            'data/postprocess/',
+            'data/final_prediction/'
+        ]
 
-        for folder in paths:
-            files=os.listdir(folder)
-            if len(files)>0:
-                for file in files:
-                    os.remove(os.path.join(folder,file))
+        for folder in self.paths:
+            os.makedirs(folder, exist_ok=True)  # Ensure folder exists
 
-if __name__=='__main__':
-    remove=remove_data()
+            for file in os.listdir(folder):
+                file_path = os.path.join(folder, file)
+                if os.path.isfile(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f"[ERROR] Could not delete {file_path}: {e}")
+
+if __name__ == '__main__':
+    cleaner = RemoveData()

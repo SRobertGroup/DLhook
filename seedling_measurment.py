@@ -25,6 +25,12 @@ import re
 
 import ast
 from PIL import Image, ImageTk
+
+try:
+    resample_filter = Image.Resampling.LANCZOS  # Pillow ≥ 10
+except AttributeError:
+    resample_filter = Image.ANTIALIAS  # Pillow < 10
+
 import cv2
 
 from torchvision.transforms import functional
@@ -111,7 +117,7 @@ class Gui():
 
         icon_img = ImageTk.PhotoImage(file="data/logo/icon.png")
         self.icon_img = icon_img
-        self.root.iconphoto(True, self.icon_img)
+        self.root.iconphoto(False, self.icon_img)
         # self.root.iconbitmap("@data/logo/icon.xbm")
         self.root.title('DLhook')
         self.root.geometry(str(self.x_length) + "x" + str(self.y_length))
@@ -185,7 +191,7 @@ class Gui():
 
         # --- Load and display the logo ---
         logo_image = Image.open("data/logo/logos.png")
-        logo_image = logo_image.resize((140, 117), Image.ANTIALIAS)  # adjust size if needed
+        logo_image = logo_image.resize((140, 117), resample_filter)  # adjust size if needed
         self.logo_photo = ImageTk.PhotoImage(logo_image)  # keep a reference
 
         self.logo_label = tk.Label(self.root, image=self.logo_photo, borderwidth=0)

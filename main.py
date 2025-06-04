@@ -3,6 +3,9 @@ from seedling_measurment import *
 import tensorflow as tf
 print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
 
+import torch
+# print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
+
 def main():
     remove_files_exit()
     root = tk.Tk()

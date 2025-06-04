@@ -1189,7 +1189,7 @@ class Gui():
 
 #Remove image files at exit of software
 def remove_files_exit():
-    remove_data()
+    RemoveData()
 
 atexit.register(remove_files_exit)
 

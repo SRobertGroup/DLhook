@@ -4,7 +4,7 @@ import tensorflow as tf
 print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
 
 import torch
-# print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
+print("torch has access to GPUs Available: ", torch.cuda.is_available())
 
 def main():
     remove_files_exit()

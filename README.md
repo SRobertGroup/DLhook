@@ -33,21 +33,18 @@ cd DLhook
 > For more information on how to set-up conda, please check the [conda user guide](https://conda.io/projects/conda/en/latest/user-guide/install)
 
 ```bash
-conda create -n dlhook_env python=3.10 -y 
-conda activate dlhook_env
-```
-### Install pytorch
-```bash
-pip install light-the-torch
-ltt install torch
-conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvidia
+mamba env create -f env.yaml
+mamba activate DLhook
 ```
 
-### Install the following python libraries.
-```bash
-pip3 install --no-cache-dir -r requirements.txt
-```
-Once the packages are installed
+> **Dependencies:**
+> - Python=3.10
+> - pytorch
+> - tensorflow
+> - realesrgan
+> - opencv
+> - pillow
+
 
 ```bash
 python main.py

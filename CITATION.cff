@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use DLhook in your work, please cite it as below."
+title: "DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings"
+authors:
+  - family-names: Radianu
+    given-names: David
+  - family-names: Heymans
+    given-names: Adrien
+  - family-names: Doyle
+    given-names: Siamsa
+  - family-names: Robert
+    given-names: Stéphanie
+  - family-names: Raggi
+    given-names: Sara
+date-released: 2025-06-04
+version: "0.2.0"
+license: MIT
+repository-code: https://github.com/SRobertGroup/DLhook
+abstract: >
+  DLhook is an open-source GUI software for high-throughput measurement of apical hook angles in dark-grown Arabidopsis thaliana seedlings. It uses deep learning (U-Net) for image segmentation and post-processing to quantify phenotypic traits with minimal manual input.
+keywords:
+  - deep learning
+  - U-Net
+  - image segmentation
+  - Arabidopsis
+  - plant phenotyping
+  - GUI
+  - apical hook

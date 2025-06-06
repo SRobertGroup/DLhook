@@ -6,6 +6,10 @@ import shutil
 import atexit
 import sys
 
+# robust tensorflow configuration
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0"
+os.environ["XLA_FLAGS"] = "--xla_gpu_unsafe_fallback_to_driver_on_ptxas_not_found"
+
 # from subprocess import list2cmdline
 from tkinter.ttk import Progressbar, Style
 from tkinter.filedialog import asksaveasfilename, askdirectory
@@ -399,6 +403,29 @@ class Gui():
             x1, y1 = event.x, event.y
             (x0, y0)=self.points
             self.line1=self.canvas.create_line(x0, y0, x1 ,y1, fill="#b87c84")
+
+    def blank_angle(self):
+        file_name = self.images_final[self.n_angle_image]
+        org_filename = self.convert_filename(file_name)
+
+        clicked_file = self.listbox.curselection()
+        for item in clicked_file:
+            data = self.listbox.get(item).split()
+            if len(data) < 2:
+                print(f"[DEBUG] Malformed listbox entry: {data}")
+                continue
+
+            id_n = int(data[0])  # seedling ID
+
+            try:
+                row_id = int(self.new_df[self.new_df['img_name'] == org_filename].index.values[0])
+                self.new_df.at[row_id, id_n] = np.nan  
+                print(f"[DEBUG] Blank angle for seedling {id_n} at row {row_id}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to blank angle for {id_n}: {e}")
+
+        # Refresh GUI list
+        self.update_listbox_for_angles(file_name)
 
     def rotate_angle_start(self):
         file_name=(self.images_final[self.n_angle_image])
@@ -910,21 +937,22 @@ class Gui():
 
 
         label_rotate=tk.Label(self.root, text ='Cotyledon rotation')
-        label_rotate.place(x=width + 463, y=height + 256)
+        label_rotate.place(x=width + 465, y=height + 256)
+        self.btn_blank_angle = tk.Button(self.root, text="Cotyledon in rotation", command=self.blank_angle)
+        self.btn_blank_angle.place(x=width + 450, y=height + 281)
 
         
-        self.button_rot_start = tk.Button(self.root, text="Start rot", width=6, command=self.rotate_angle_start)
-        self.button_rot_start.place(x=width + 464, y=height + 281)
+        # self.button_rot_start = tk.Button(self.root, text="Start rot", width=6, command=self.rotate_angle_start)
+        # self.button_rot_start.place(x=width + 464, y=height + 281)
+# 
+# 
+        # self.button_rot_end = tk.Button(self.root, text="End rot", width=6, command=self.rotate_angle_end)
+        # self.button_rot_end.place(x=width + 518, y=height + 281)
+# 
+        # self.rotate_data={}
 
-
-        self.button_rot_end = tk.Button(self.root, text="End rot", width=6, command=self.rotate_angle_end)
-        self.button_rot_end.place(x=width + 518, y=height + 281)
-
-        self.rotate_data={}
-
-
-        label_show_image=tk.Label(self.root, text ='Show prediction')
-        label_show_image.place(x=width + 473, y=height + 330)
+        label_show_image=tk.Label(self.root, text ='Use the arrows to navigate\n through image time points')
+        label_show_image.place(x=width + 450, y=height + 330)
         
 
         self.buttonNext_angle_img = tk.Button(self.root, text="-->", width=4, command=self.next_angle_img)
@@ -958,7 +986,7 @@ class Gui():
         Label_seedling = tk.Label(self.root,text ='#Seedling')
         Label_seedling.place(x=width + 450, y=height - 120)
         Label_seedling_angle = tk.Label(self.root,text ='Angle')
-        Label_seedling_angle.place(x=width + 550, y=height - 120)
+        Label_seedling_angle.place(x=width + 500, y=height - 120)
 
 
         self.listbox = tk.Listbox(self.root, width=22, height=12)

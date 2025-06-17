@@ -45,10 +45,20 @@ mamba activate dlhook_env
 - opencv
 - pillow
 
+#### For faster runs with GPU [CUDA]
+
 ```bash
 pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip3 install --no-cache-dir -r requirements.txt
 ```
+
+#### For slow runs with CPU
+
+```bash
+pip3 install torch torchvision torchaudio
+pip3 install --no-cache-dir -r requirement.txt
+```
+
 ### Start DLhook
 
 ```bash
@@ -65,8 +75,8 @@ The input should be a directory containing the batch of the kinematics images wi
 ```bash
 images_folder
    |-- images
-       |-- img001.png
-       |-- img002.png
+       |-- Col0_001.tif
+       |-- Col0_002.tif
        |-- ...
 ```
 
@@ -100,8 +110,7 @@ images_folder
 ![](docs/img/8-repo.png)
 
 
-<b>Step 7</b>. The user does also have the posibility to fill in the apical hook angles of seedlings which are rotating, such that the cotyledon is in the front/back of the hypocotyl(parallel to). As the apical hook angle of rotating seedlings can't be measured correctly by a 2D image. Thus, the user can select the seedling from the start of the rotation and the end of the rotation when the cotyledon is pointing in the opposite direction, the software will then fill in the angle from the 'start seedling' to all the timesteps between to the 'end seedling'.
-The following image illustrates how the software automatically measures the apical hook angle of a rotating apical hook compared to the manually corrected apical hook angle.
+<b>Step 7</b>. The user does also have the posibility to remove in the apical hook angles of seedlings which are rotating, such that the cotyledon is in the front/back of the hypocotyl(parallel to). As the apical hook angle of rotating seedlings can't be measured correctly by a 2D image.
 
 
 ## Citation

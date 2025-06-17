@@ -952,7 +952,7 @@ class Gui():
         # self.rotate_data={}
 
         label_show_image=tk.Label(self.root, text ='Use the arrows to navigate\n through image time points')
-        label_show_image.place(x=width + 450, y=height + 330)
+        label_show_image.place(x=width + 450, y=height + 320)
         
 
         self.buttonNext_angle_img = tk.Button(self.root, text="-->", width=4, command=self.next_angle_img)
@@ -986,7 +986,7 @@ class Gui():
         Label_seedling = tk.Label(self.root,text ='#Seedling')
         Label_seedling.place(x=width + 450, y=height - 120)
         Label_seedling_angle = tk.Label(self.root,text ='Angle')
-        Label_seedling_angle.place(x=width + 500, y=height - 120)
+        Label_seedling_angle.place(x=width + 515, y=height - 120)
 
 
         self.listbox = tk.Listbox(self.root, width=22, height=12)

@@ -103,8 +103,6 @@ images_folder
 
 <b>Step 5</b>. The following image shows the apical hook measurments given by the software. The user has to go through and double-check if the measurments are correct or not before saving the data to a `CSV`.
 
-![](docs/img/6-repo.png)
-
 <b>Step 6</b>. If a yeilded measurment is incorrect the user can correct it directly in the software by firstly clicking on the incorrect measurment in the list, and then pressing the `Place angle` button. Thereon place three points which forms and angle reprecenting the apical hook of the specific seedling. The `Manual angle:` section in the graphical user interface shows the angle of the manually placed angle. If the manually placed angle is incorrectly placed, the user can just click on any location on the image once again, thus removing the previously placed angle and starting a new one. If the user wants to manually replace a seedling with a overhook the `Overhook` checkbox should be checked, and when placing the manually placed angle should be pointing **downwards**.
 
 ![](docs/img/8-repo.png)

@@ -1,3 +1,9 @@
 realesrgan
 pandas
-tensorflow[and-cuda]
+opencv-python
+scikit-image
+matplotlib
+pillow
+torch
+torchvision
+torchaudio

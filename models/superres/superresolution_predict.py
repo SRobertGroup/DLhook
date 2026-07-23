@@ -12,16 +12,10 @@ import numpy as np
 
 
 """
-
-The follwoing class can either be used from other scripts or can be used directly in the derminal by giving the input path to the images, with the desired output path that the script will generate and fill with the super-res images.
-
-The output
-
-
+The follwoing class can either be used from other scripts or can be used directly in the terminal by giving the input path to the images, 
+with the desired output path that the script will generate and fill with the super-res images.
+The output will have 4 times the res of the initial image.
 """
-
-
-
 
 
 class RealesrganSuperresolution:
@@ -46,9 +40,6 @@ class RealesrganSuperresolution:
         output, _ = self.upsampler.enhance(img_np, outscale=4)
         return output
 
-
-
-
     #Input: input-path of the original images and output-path of the super-res images.
     def enhance_dir(self, input_dir, output_dir):
         for img in os.listdir(input_dir):
@@ -57,35 +48,3 @@ class RealesrganSuperresolution:
             # img_x=np.array(img_x)
             img_superres=self.enhance(img_x)
             cv2.imwrite(os.path.join(output_dir,img), img_superres)
-
-
-
-# if __name__ =="__main__":
-#     parser = argparse.ArgumentParser(description='RealESR-GAN+ Super Resolution image upscaler')
-#     parser.add_argument('-i','--input', help='Path to input image directory', required=True)
-#     parser.add_argument('-o','--output', help='Path to output image directory  - the script will generate the directory', required=True)
-#     args = vars(parser.parse_args())
-
-#     if args['input'] and args['output']:
-
-#         check_input_path=os.path.isdir(args['input'])
-#         check_output_path=os.path.isdir(args['output'])
-
-
-#         if check_input_path != None and check_output_path != None:
-
-#             try:
-#                 os.mkdir(args['output'])
-#                 superres_model=realesrgan_superresolution()
-#                 superres_model.enhance_dir(args['input'], args['output'])
-
-#             except:
-#                 if os.path.isdir(args['output']):
-#                     print('Output directory with the same already exists')
-
-#                 else:
-#                     print("Wrong output path format/No images in input directory")
-
-
-#     else:
-#         print("Input- and output-path required")

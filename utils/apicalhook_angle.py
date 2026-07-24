@@ -254,15 +254,18 @@ class AngleCalculator:
 
         if insert_y[1] < min(yc, ys):
             bio_state = "Closed" if angle < self.CLOSED_ANGLE_THRESHOLD_DEG else "Opening"
-            angle = 180-angle
         elif cotyl_tip[1] > stem_hook_end[1]:
             bio_state = "Overhooked"
-            # Continuous 0-360 scale with 180 = closed: Overhooked means the
-            # cotyledon has rotated past closed, so this should read >180, not
-            # negative (the old `angle -= 180` produced negative numbers).
-            angle = 360 - angle
         else:
             bio_state = "Open"
+
+        # Continuous 0-360 scale with 180 = closed, decreasing towards 0 as the
+        # cotyledon opens: Closed/Opening/Open all share the same 180-angle
+        # mirror so the curve stays continuous across that transition: only
+        # Overhooked (folded back past closed) departs from it, reading >180
+        # instead of negative (the old `angle -= 180` produced negative
+        # numbers).
+        angle = 360 - angle if bio_state == "Overhooked" else 180 - angle
 
         return angle, bio_state
 

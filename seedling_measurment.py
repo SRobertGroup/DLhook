@@ -9,7 +9,7 @@ import sys
 # from subprocess import list2cmdline
 from tkinter.ttk import Progressbar, Style, Separator
 from tkinter.filedialog import asksaveasfilename, askdirectory
-from tkinter import simpledialog
+from tkinter import simpledialog, messagebox
 from models.UNetInference import *  # RootPainter
 # from numpy.lib.function_base import select
 from utils.apicalhook_angle import *
@@ -52,6 +52,23 @@ from models.superres.superresolution_predict import RealesrganSuperresolution
 This is the graphical user interface for the DLhook software
 
 """
+
+# Extensions accepted when browsing an image folder. Kept to 4 characters
+# (".tif", ".png", ".jpg", ".bmp") since other code (e.g. `image[:-4]`)
+# assumes a 4-character extension when deriving output filenames.
+VALID_IMAGE_EXTENSIONS = ('.tif', '.png', '.jpg', '.bmp')
+
+
+def _list_image_files(path):
+    """Return sorted image filenames in `path`, skipping subfolders and
+    non-image files (e.g. exported CSVs, Thumbs.db) that would otherwise be
+    picked up by a plain os.listdir and later fail to load in cv2.imread."""
+    return sorted(
+        f for f in os.listdir(path)
+        if f.lower().endswith(VALID_IMAGE_EXTENSIONS) and os.path.isfile(os.path.join(path, f))
+    )
+
+
 class Gui():
     def __init__(self, root):
 
@@ -241,7 +258,7 @@ class Gui():
 
         # --- Bottom bar (progress), spans full window width ---
         self.bottom_frame = tk.Frame(self.root)
-        self.bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
+        self.bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         self.progress_bar_label = tk.Label(self.bottom_frame, text = "Measurement progress:")
         self.progress_bar_label.pack(side=tk.LEFT)
         self.progress = Progressbar(self.bottom_frame, orient=tk.HORIZONTAL, length=700)
@@ -1198,9 +1215,9 @@ class Gui():
             folder=self.path.split('/')
             self.save_path=self.path_crop+folder[-1]
 
-            self.file_list=sorted(os.listdir(self.path))
+            self.file_list=_list_image_files(self.path)
 
-            path=sorted(os.listdir(self.path))
+            path=self.file_list
 
 
             for file_n in path:
@@ -1216,8 +1233,8 @@ class Gui():
             self.path=askdirectory()
             folder=self.path.split('/')
             self.save_path=self.path_crop+folder[-1]
-            self.file_list=os.listdir(self.path)
-            path=sorted(os.listdir(self.path))
+            self.file_list=_list_image_files(self.path)
+            path=self.file_list
 
             for file_n in path:
                 self.listbox.insert(tk.END, file_n)
@@ -1264,6 +1281,9 @@ class Gui():
 
                 self.image_n = cv2.imread(self.path+"/"+self.listbox.get(item))
                 image_n=self.image_n
+                if image_n is None:
+                    messagebox.showerror("Cannot open image", f"Failed to read image file:\n{self.listbox.get(item)}")
+                    return
                 # height1, width1, _ = image_n.shape
                 self.height1, self.width1, _ = image_n.shape
 
@@ -1286,6 +1306,9 @@ class Gui():
 
                 image_n = cv2.imread(self.path+"/"+self.listbox.get(item))
                 self.img_format=self.listbox.get(item)[-4:]
+                if image_n is None:
+                    messagebox.showerror("Cannot open image", f"Failed to read image file:\n{self.listbox.get(item)}")
+                    return
                 # height1, width1, channels1 = image_n.shape
                 self.height1, self.width1, _ = image_n.shape
                 

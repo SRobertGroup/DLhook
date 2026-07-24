@@ -31,34 +31,48 @@ class GerminationDetector:
     not germination).
 
     `proximity_radius`/`area_threshold` are expressed in the same pixel space
-    as the seed coat point and germ contours (the fixed working crop size,
-    e.g. 1024x1024) -- there's no ground-truth germination timing available
-    to calibrate exact defaults against, so these are deliberately tunable
-    rather than hardcoded biology.
+    as the seed coat point and germ contours -- each seedling's own crop
+    keeps its native, box-derived pixel size (crops are not resized to a
+    shared fixed working size), so by default these scale per seedling from
+    the `crop_size` passed into detect() rather than a single hardcoded
+    constant. There's no ground-truth germination timing available to
+    calibrate exact defaults against either way, so these remain tunable.
     """
 
-    def __init__(self, crop_size, proximity_radius=None, area_threshold=None):
-        self.proximity_radius = proximity_radius if proximity_radius is not None else crop_size * 0.12
-        self.area_threshold = area_threshold if area_threshold is not None else (self.proximity_radius ** 2) * np.pi * 0.05
+    def __init__(self, proximity_radius=None, area_threshold=None):
+        # Overrides, if given, apply to every seedling regardless of its own
+        # crop size. Otherwise detect() derives them per call from that
+        # seedling's own crop_size, since crops are no longer resized to a
+        # shared fixed working size (each seedling's crop keeps its own
+        # box-derived pixel dimensions).
+        self._proximity_radius_override = proximity_radius
+        self._area_threshold_override = area_threshold
 
         self.germination_frame = {}
         self._overrides = {}
 
-    def detect(self, seedling_id, germ_contours_by_frame, seed_point):
+    def detect(self, seedling_id, germ_contours_by_frame, seed_point, crop_size):
         """
         germ_contours_by_frame: list of contour-lists, one per frame, in
         time order, for this seedling only.
         seed_point: (x, y) seed coat location for this seedling.
+        crop_size: this seedling's own crop's pixel size (e.g. average of its
+        width/height), used to scale proximity_radius/area_threshold to it.
 
         Stores and returns the detected time-zero frame index, or None if
         the threshold is never met for two consecutive frames.
         """
-        areas = [_area_near_point(contours, seed_point, self.proximity_radius)
+        proximity_radius = (self._proximity_radius_override if self._proximity_radius_override is not None
+                             else crop_size * 0.12)
+        area_threshold = (self._area_threshold_override if self._area_threshold_override is not None
+                           else (proximity_radius ** 2) * np.pi * 0.05)
+
+        areas = [_area_near_point(contours, seed_point, proximity_radius)
                  for contours in germ_contours_by_frame]
 
         frame_idx = None
         for t in range(len(areas) - 1):
-            if areas[t] >= self.area_threshold and areas[t + 1] >= self.area_threshold:
+            if areas[t] >= area_threshold and areas[t + 1] >= area_threshold:
                 frame_idx = t
                 break
 

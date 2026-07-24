@@ -7,7 +7,7 @@ import atexit
 import sys
 
 # from subprocess import list2cmdline
-from tkinter.ttk import Progressbar, Style
+from tkinter.ttk import Progressbar, Style, Separator
 from tkinter.filedialog import asksaveasfilename, askdirectory
 from tkinter import simpledialog
 from models.UNetInference import *  # RootPainter
@@ -16,10 +16,11 @@ from utils.apicalhook_angle import *
 from utils.clean_on_exit import *
 from utils.matching_crop2points_GUI import *
 from utils.preprocess_model_input import *
-from utils.postprocmask import PostprocessMasks, point_num
+from utils.postprocmask import PostprocessMasks, point_num, resolve_mask_path
 from utils.gui_thread_safety import ProgressReporter
 from utils.germination_detector import GerminationDetector
 from ui.analysis_window import SeedlingAnalysisWindow
+from ui.kinematics_window import KinematicsWindow
 
 from datetime import datetime
 import threading
@@ -103,13 +104,18 @@ class Gui():
         self.cotyl_time_series_by_crop={}
         self.germ_time_series_by_crop={}
 
-        self.activ_button=False
+        # Per-seedling (crop_id) computed frame results/filenames, populated by
+        # SeedlingAnalysisWindow (and by _export_results for any seedling never
+        # previewed) -- kept on Gui rather than the Toplevel instance so a
+        # seedling's results (including manual angle overrides) survive its
+        # preview window being closed, and are visible to "Export results".
+        self.frame_results_by_crop={}
+        self.cropped_filenames_by_crop={}
 
         #The following variables are used to controll the buttons,
         self.check_place_rect=False
         self.crop_window_check=False
         self.rectangle_circle_match=[]
-        self.manual_angle=False
         self.point_numb=1
         self.button_circle_check=False
         self.show_image_check=False
@@ -117,14 +123,22 @@ class Gui():
         self.rectangle_width=0
         self.rectangle_height=0
 
-        self.crop_size = 1024
-        self.crop_half_size = 512  # Half of the 1024x1024 crop area; also the default floor for auto-derived boxes
+        # Crops keep each seedling's own box-derived native pixel size --
+        # never resized/padded to a fixed working size (UNetInference tiles
+        # at native resolution, so there's no need for one).
+        self.min_box_half_size = 30  # Degenerate-case floor only (e.g. start == end); boxes otherwise hug the start/end points + padding
+        self.crop_padding_width_fraction = 0.4
+        self.crop_padding_height_fraction = 0.10
 
         self.x_length=1100
         self.y_length=650
         width=self.x_length
         height=self.y_length
-        
+        self.sidebar_width=300
+        self.bottom_bar_height=60
+        self.win_width=self.x_length + self.sidebar_width
+        self.win_height=self.y_length + self.bottom_bar_height
+
         self.filenames_listbox=False
 
         self.root=root
@@ -139,88 +153,104 @@ class Gui():
         self.root.iconphoto(False, self.icon_img)
         # self.root.iconbitmap("@data/logo/icon.xbm")
         self.root.title('DLhook')
-        self.root.geometry(str(self.x_length) + "x" + str(self.y_length))
-        self.fin = tk.Frame(self.root, width=200, height=200)
-        self.fin.pack()
-        self.fin.place(x=0, y=0)
-        self.canvas = tk.Canvas(self.fin, bg='#FFFFFF', width=width, height=height)
+        self.root.geometry(f"{self.win_width}x{self.win_height}")
+        self.root.resizable(False, False)
+
+        # --- Canvas (left) ---
+        self.canvas_frame = tk.Frame(self.root, width=width, height=height)
+        self.canvas_frame.grid(row=0, column=0, sticky="nw")
+        self.canvas_frame.grid_propagate(False)
+        self.canvas = tk.Canvas(self.canvas_frame, bg='#FFFFFF', width=width, height=height)
         self.canvas.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
-        self.btn_import_image = tk.Button(self.root, text="Open image directory", width=17, command=self.add_files)
 
-        self.btn_import_image.place(x=width + 25, y=height - 640)
-        
-        self.listbox = tk.Listbox(self.root, width=25)
-        self.listbox.place(x=width + 10, y=height - 610)
+        # --- Sidebar (right) ---
+        self.sidebar_frame = tk.Frame(self.root, width=self.sidebar_width)
+        self.sidebar_frame.grid(row=0, column=1, sticky="n", padx=10, pady=10)
+        self.sidebar_frame.grid_propagate(False)
 
-        self.btn_show_image = tk.Button(self.root, text="Show image", width=10, command=self.show_image)
+        sidebar_row = 0
+        self.btn_import_image = tk.Button(self.sidebar_frame, text="Open image directory", width=17, command=self.add_files)
+        self.btn_import_image.grid(row=sidebar_row, column=0, sticky="w", pady=(0, 6)); sidebar_row += 1
+
+        self.listbox = tk.Listbox(self.sidebar_frame, width=25)
+        self.listbox.grid(row=sidebar_row, column=0, sticky="w", pady=(0, 6)); sidebar_row += 1
+
+        self.btn_show_image = tk.Button(self.sidebar_frame, text="Show image", width=10, command=self.show_image)
         self.btn_show_image["state"]=tk.DISABLED
-        self.btn_show_image.place(x=width + 50, y=height - 440)
+        self.btn_show_image.grid(row=sidebar_row, column=0, sticky="w", pady=(0, 14)); sidebar_row += 1
 
-        self.label_user_input = tk.Label(self.root, text = "User Input")
-        self.label_user_input.place(x=width + 59, y=height - 305)
+        self.label_user_input = tk.Label(self.sidebar_frame, text = "User Input")
+        self.label_user_input.grid(row=sidebar_row, column=0, sticky="w", pady=(0, 6)); sidebar_row += 1
 
-        self.label_1 = tk.Label(self.root, text = "1.")
-        self.label_1.place(x=width + 20, y=height - 277)
-        self.button_place_point=tk.Button(self.root, text="Place points", width=10, command=self.canvas_circle_activate)
-        self.button_place_point.place(x=width + 50, y=height - 280)
+        step1_frame = tk.Frame(self.sidebar_frame)
+        step1_frame.grid(row=sidebar_row, column=0, sticky="w", pady=4); sidebar_row += 1
+        self.label_1 = tk.Label(step1_frame, text = "1.")
+        self.label_1.pack(side=tk.LEFT)
+        self.button_place_point=tk.Button(step1_frame, text="Place points", width=10, command=self.canvas_circle_activate)
+        self.button_place_point.pack(side=tk.LEFT, padx=(6, 0))
         self.button_place_point["state"]=tk.DISABLED
 
-        self.label_2 = tk.Label(self.root, text = "2.")
-        self.label_2.place(x=width + 20, y=height - 227)
-        self.button_crop = tk.Button(self.root, text="Crop image", width=10, command=self.crop_image)
-        self.button_crop.place(x=width + 50, y=height - 230)
+        step2_frame = tk.Frame(self.sidebar_frame)
+        step2_frame.grid(row=sidebar_row, column=0, sticky="w", pady=4); sidebar_row += 1
+        self.label_2 = tk.Label(step2_frame, text = "2.")
+        self.label_2.pack(side=tk.LEFT)
+        self.button_crop = tk.Button(step2_frame, text="Crop image", width=10, command=self.crop_image)
+        self.button_crop.pack(side=tk.LEFT, padx=(6, 0))
         self.button_crop["state"]=tk.DISABLED
 
-        self.crop_padding_var = tk.StringVar(value="40")
-        self.crop_padding_label = tk.Label(self.root, text="Box padding %:")
-        self.crop_padding_label.place(x=width + 20, y=height - 130)
-        self.crop_padding_entry = tk.Entry(self.root, width=5, textvariable=self.crop_padding_var)
-        self.crop_padding_entry.place(x=width + 140, y=height - 130)
-
-
-        self.label_3 = tk.Label(self.root, text = "3.")
-        self.label_3.place(x=width + 20, y=height - 177)
-        self.button_start_analysis = tk.Button(self.root, text="Start Analysis", width=10, command=self._threading_analysis)
-        self.button_start_analysis.place(x=width + 50, y=height - 180)
+        step3_frame = tk.Frame(self.sidebar_frame)
+        step3_frame.grid(row=sidebar_row, column=0, sticky="w", pady=4); sidebar_row += 1
+        self.label_3 = tk.Label(step3_frame, text = "3.")
+        self.label_3.pack(side=tk.LEFT)
+        self.button_start_analysis = tk.Button(step3_frame, text="Start Analysis", width=10, command=self._threading_analysis)
+        self.button_start_analysis.pack(side=tk.LEFT, padx=(6, 0))
         self.button_start_analysis["state"]=tk.DISABLED
 
-        self.label_4 = tk.Label(self.root, text = "4.")
-        self.label_4.place(x=width + 20, y=height - 80)
-        self.button_preview_seedlings = tk.Button(self.root, text="Preview seedling", width=13, command=self.open_seedling_picker)
-        self.button_preview_seedlings.place(x=width + 50, y=height - 83)
+        step4_frame = tk.Frame(self.sidebar_frame)
+        step4_frame.grid(row=sidebar_row, column=0, sticky="w", pady=4); sidebar_row += 1
+        self.label_4 = tk.Label(step4_frame, text = "4.")
+        self.label_4.pack(side=tk.LEFT)
+        self.button_preview_seedlings = tk.Button(step4_frame, text="Preview seedling", width=13, command=self.open_seedling_picker)
+        self.button_preview_seedlings.pack(side=tk.LEFT, padx=(6, 0))
         self.button_preview_seedlings["state"]=tk.DISABLED
 
+        step5_frame = tk.Frame(self.sidebar_frame)
+        step5_frame.grid(row=sidebar_row, column=0, sticky="w", pady=4); sidebar_row += 1
+        self.label_5 = tk.Label(step5_frame, text = "5.")
+        self.label_5.pack(side=tk.LEFT)
+        self.button_export_results = tk.Button(step5_frame, text="Export results", width=13, command=self._export_results)
+        self.button_export_results.pack(side=tk.LEFT, padx=(6, 0))
+        self.button_export_results["state"]=tk.DISABLED
+        self.button_kinematics = tk.Button(step5_frame, text="Show kinematics", width=13, command=self._open_kinematics_window)
+        self.button_kinematics.pack(side=tk.LEFT, padx=(6, 0))
+        self.button_kinematics["state"]=tk.DISABLED
 
-        self.progress = Progressbar(self.root, orient=tk.HORIZONTAL, length=700)
-        self.progress.place(x=width - 900, y=height + 15)
-        self.progress_bar_label = tk.Label(self.root,
-                  text = "Measurement progress:")
-        self.progress_bar_label.place(x=width - 1030, y=height + 15)
+        sep = Separator(self.sidebar_frame, orient=tk.HORIZONTAL)
+        sep.grid(row=sidebar_row, column=0, sticky="ew", pady=10); sidebar_row += 1
+
+        self.debug_var=tk.IntVar(value=1)
+        self.check_button_debug= tk.Checkbutton(self.sidebar_frame, text='Debug Mode', variable=self.debug_var)
+        self.check_button_debug.grid(row=sidebar_row, column=0, sticky="w", pady=(0, 10)); sidebar_row += 1
+
+        # --- Load and display the logo ---
+        logo_image = Image.open("data/logo/logos.png")
+        logo_image = logo_image.resize((100, 84), resample_filter)  # adjust size if needed
+        self.logo_photo = ImageTk.PhotoImage(logo_image)  # keep a reference
+
+        self.logo_label = tk.Label(self.sidebar_frame, image=self.logo_photo, borderwidth=0)
+        self.logo_label.grid(row=sidebar_row, column=0, sticky="w"); sidebar_row += 1
+
+        # --- Bottom bar (progress), spans full window width ---
+        self.bottom_frame = tk.Frame(self.root, height=self.bottom_bar_height)
+        self.bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
+        self.progress_bar_label = tk.Label(self.bottom_frame, text = "Measurement progress:")
+        self.progress_bar_label.pack(side=tk.LEFT)
+        self.progress = Progressbar(self.bottom_frame, orient=tk.HORIZONTAL, length=700)
+        self.progress.pack(side=tk.LEFT, padx=(10, 0))
 
         # Thread-safe channel for background analysis to report progress back to the GUI
         self.progress_reporter = ProgressReporter()
         self.root.after(100, self._pump_progress)
-
-
-        # --- Load and display the logo ---
-        logo_image = Image.open("data/logo/logos.png")
-        logo_image = logo_image.resize((140, 117), resample_filter)  # adjust size if needed
-        self.logo_photo = ImageTk.PhotoImage(logo_image)  # keep a reference
-
-        self.logo_label = tk.Label(self.root, image=self.logo_photo, borderwidth=0)
-        self.logo_label.place(x=width + 30, y=height - 70)  # adjust as needed
-
-        self.debug_var=tk.IntVar(value=1)
-        self.check_button_debug= tk.Checkbutton(self.root, text='Debug Mode',variable=self.debug_var)
-        self.check_button_debug.place(x=width + 45, y=height + 18)
-        #self.button_place_point_remove=tk.Button(self.root, text="Points remove section", width=20, command=self.replace_angle)
-        #self.button_place_point_remove.place(x=width + 10, y=height - 260)
-
-        self.angle_p=[]
-        self.angle_lines=[]
-        self.new_angle_points=[]
-        self.line1=False
-        self.vinkel=[]
 
 
     def start_sort(self):
@@ -272,174 +302,6 @@ class Gui():
             self.sort_txt_box.delete("1.0", tk.END)  # Ensure clean state
             self.sort_txt_box.insert(tk.INSERT, self.selected_image)
             print(f"[DEBUG] Selected image for sorting reference: {self.selected_image}")
-
-    def replace_angle(self):
-        if self.activ_button:
-            self.activate_manual_ang()
-
-        file_name = self.images_final[self.n_angle_image]
-        org_filename = self.convert_filename(file_name)
-
-        clicked_file = self.listbox.curselection()
-        for item in clicked_file:
-            data = self.listbox.get(item).split()
-            if len(data) < 2:
-                print(f"[DEBUG] Malformed listbox entry: {data}")
-                return
-
-            id_n = int(data[0])
-            new_angle = self.new_angle
-
-            try:
-                row_id = int(self.new_df[self.new_df['img_name'] == org_filename].index.values[0])
-                self.new_df.at[row_id, id_n] = new_angle
-                print(f"[DEBUG] Updated angle for seedling {id_n} to {new_angle}")
-            except Exception as e:
-                print(f"[DEBUG] Error updating angle: {e}")
-                return
-
-        # Refresh listbox using the unified method
-        self.update_listbox_for_angles(file_name)
-
-    def blank_angle(self):
-        file_name = self.images_final[self.n_angle_image]
-        org_filename = self.convert_filename(file_name)
-
-        clicked_file = self.listbox.curselection()
-        for item in clicked_file:
-            data = self.listbox.get(item).split()
-            if len(data) < 2:
-                print(f"[DEBUG] Malformed listbox entry: {data}")
-                continue
-
-            id_n = int(data[0])  # seedling ID
-
-            try:
-                row_id = int(self.new_df[self.new_df['img_name'] == org_filename].index.values[0])
-                self.new_df.at[row_id, id_n] = np.nan  
-                print(f"[DEBUG] Blank angle for seedling {id_n} at row {row_id}")
-            except Exception as e:
-                print(f"[DEBUG] Failed to blank angle for {id_n}: {e}")
-
-        # Refresh GUI list
-        self.update_listbox_for_angles(file_name)
-
-
-    def place_angle_point(self, event):
-        width=200
-        height=200
-        x1, y1 = event.x, event.y
-        r=1
-
-        self.root.bind("<Motion>", self.place_angle_line)
-        if (x1 < self.x_length) and (y1 < self.y_length) and self.manual_angle==True:
-            if self.check_place_angele == 3:
-                self.angle_label.destroy()
-                for n in self.angle_p:
-                    self.canvas.delete(n)
-                self.angle_p=[]
-
-                for m in self.angle_lines:
-                    self.canvas.delete(m)
-                self.angle_lines = []
-                self.check_place_angele = 0
-                self.new_angle_points=[]
-                self.vinkel=[]
-
-            if self.check_place_angele == 2:
-                (x0, y0) = self.points
-                self.check_place_angele = self.check_place_angele + 1
-                point3 = self.canvas.create_rectangle(x1 - r, y1 - r, x1 + r, y1 + r, stipple='', fill="#b87c84")
-                line3 = self.canvas.create_line(x0, y0, x1, y1,fill="#b87c84")
-
-
-
-                self.angle_lines.append(line3)
-
-                self.angle_p.append(point3)
-                self.points = (x1, y1)
-                self.new_angle_points.append((x1, y1))
-                self.c = np.array([x1, y1])
-
-            if self.check_place_angele==1:
-
-                (x0,y0)=self.points
-                self.check_place_angele = self.check_place_angele + 1
-                point2 = self.canvas.create_rectangle(x1 - r, y1 - r, x1 + r, y1 + r, stipple='', fill="green")
-                line2 = self.canvas.create_line(x0,y0,x1,y1,fill="#b87c84")
-
-                self.b=np.array([x1,y1])
-
-                self.angle_lines.append(line2)
-                self.angle_p.append(point2)
-                self.points = (x1, y1)
-                self.new_angle_points.append((x1, y1))
-
-            if self.check_place_angele==0:
-
-                self.check_place_angele=self.check_place_angele+1
-                point1=self.canvas.create_rectangle(x1 - r, y1 - r, x1 + r, y1 + r, stipple='', fill="green")
-                self.angle_p.append(point1)
-                self.points = (x1, y1)
-                self.new_angle_points.append((x1,y1))
-                self.a = np.array([x1, y1])
-
-            if self.check_place_angele == 3:
-
-                ba=self.a - self.b
-                bc=self.c - self.b
-                cosine_ang=np.dot(ba, bc) /(np.linalg.norm(ba) * np.linalg.norm(bc))
-                angle= np.arccos(cosine_ang)
-                self.new_angle=round(np.degrees(angle))
-
-                overhook=self.overhook_var.get()
-                if overhook==1:
-                    self.new_angle=-self.new_angle
-                    self.angle_label=tk.Label(self.root, text =str(self.new_angle)+'°')
-                    self.angle_label.place(x=width + 545, y=height + 115)
-                else:
-                    self.angle_label=tk.Label(self.root, text =str(self.new_angle)+'°'+' ('+str(180-self.new_angle)+'°)')
-                    self.angle_label.place(x=width + 545, y=height + 115)
-
-    def del_angle_line(self):
-        self.canvas.delete(self.line1)
-
-    def place_angle_line(self,event):
-        if self.check_place_angele<3 and self.manual_angle==True:
-            if self.line1!=False:
-                self.del_angle_line()
-
-            x1, y1 = event.x, event.y
-            (x0, y0)=self.points
-            self.line1=self.canvas.create_line(x0, y0, x1 ,y1, fill="#b87c84")
-
-    def activate_manual_ang(self):
-        if self.activ_button==True:
-            self.buttonPlace_angle.configure(bg='white')
-            for m in self.angle_lines:
-                self.canvas.delete(m)
-
-
-
-        if self.activ_button==False:
-            self.buttonPlace_angle.configure(bg="#d78a5e")
-            self.activ_button=True
-
-
-
-        if self.manual_angle==False:
-            self.angle_points=[]
-            self.check_place_angele=0
-            self.manual_angle=True
-            self.root.bind("<Button-1>", self.place_angle_point)
-        else:
-            self.manual_angle=False
-            for n in self.angle_p:
-                self.canvas.delete(n)
-            self.angle_p = []
-
-            for m in self.angle_lines:
-                self.canvas.delete(m)
 
     def canvas_circle_activate(self):
 
@@ -533,26 +395,18 @@ class Gui():
         if not self.crop_boxes:
             self.button_crop["state"] = tk.DISABLED
 
-    def _get_padding_fraction(self):
-        try:
-            return max(0.0, float(self.crop_padding_var.get())) / 100
-        except (ValueError, AttributeError):
-            return 0.4
-
     def _compute_crop_box(self, start, end):
-        self.update_rectangle_size()
-        padding = self._get_padding_fraction()
-
         min_x, max_x = min(start[0], end[0]), max(start[0], end[0])
         min_y, max_y = min(start[1], end[1]), max(start[1], end[1])
 
-        half_w = (max_x - min_x) * (1 + 2 * padding) / 2
-        half_h = (max_y - min_y) * (1 + 2 * padding) / 2
+        half_w = (max_x - min_x) * (1 + 2 * self.crop_padding_width_fraction) / 2
+        half_h = (max_y - min_y) * (1 + 2 * self.crop_padding_height_fraction) / 2
 
-        # Floor only: never smaller than the old fixed default. No ceiling --
-        # a box must be free to grow past that default to fully contain a seedling.
-        half_w = max(half_w, self.crop_half_size)
-        half_h = max(half_h, self.crop_half_size)
+        # Only a degenerate-case floor (e.g. start == end) -- the box hugs
+        # the start/end points plus padding, it is not floored up to any
+        # fixed default size.
+        half_w = max(half_w, self.min_box_half_size)
+        half_h = max(half_h, self.min_box_half_size)
 
         return {
             "cx": round((min_x + max_x) / 2),
@@ -637,9 +491,8 @@ class Gui():
         elif name == "se":
             x2, y2 = ix, iy
 
-        min_half = 10
-        half_w = max(abs(x2 - x1) / 2, min_half)
-        half_h = max(abs(y2 - y1) / 2, min_half)
+        half_w = max(abs(x2 - x1) / 2, self.min_box_half_size)
+        half_h = max(abs(y2 - y1) / 2, self.min_box_half_size)
 
         box["cx"] = round((x1 + x2) / 2)
         box["cy"] = round((y1 + y2) / 2)
@@ -660,15 +513,6 @@ class Gui():
         python = sys.executable
         os.execl(python, python, * sys.argv)
         
-    def update_rectangle_size(self):
-        # Default/floor crop half-size, derived from image width; used by
-        # _compute_crop_box as the minimum size for an auto-derived crop box.
-        if hasattr(self, 'width1') and hasattr(self, 'height1'):
-            self.crop_half_size = round(self.width1 / 8)
-            self.crop_size = self.crop_half_size * 2
-        else:
-            print("[WARNING] Image dimensions not set yet. Cannot update rectangle size.")
-
     def canvas_to_image_coords(self, canvas_x, canvas_y):
         """Convert canvas coordinates (scaled) to actual image coordinates."""
         if not hasattr(self, 'width1') or not hasattr(self, 'height1'):
@@ -733,7 +577,19 @@ class Gui():
             if "message" in event:
                 self.progress_bar_label.configure(text=event["message"])
             if event.get("done"):
-                self.openNewWindow()
+                self.button_crop["state"] = tk.NORMAL
+                self.button_start_analysis["state"] = tk.NORMAL
+                self.button_place_point["state"] = tk.NORMAL
+                self.btn_show_image["state"] = tk.NORMAL
+                self.btn_import_image["state"] = tk.NORMAL
+                self.progress_bar_label.configure(
+                    text="Analysis complete -- use Preview seedling to review, or Export results when done")
+            if event.get("export_done"):
+                self.button_export_results["state"] = tk.NORMAL
+                file_formats = [('CSV-file', '*.csv')]
+                save_file_path = asksaveasfilename(filetypes=file_formats, defaultextension=file_formats)
+                if save_file_path:
+                    event["export_df"].to_csv(save_file_path, index=False)
         self.root.after(100, self._pump_progress)
 
     def _reset_main_window(self):
@@ -764,7 +620,6 @@ class Gui():
         match_p = MatchCropPoints(
             self.crop_boxes,
             [pair["start"] for pair in self.seedling_pairs],
-            working_size=self.crop_size,
         )
         self.crop_points_distributed = match_p.return_crop_points()
 
@@ -805,28 +660,16 @@ class Gui():
 
                 crop = img_x[y_1:y_2, x_1:x_2]
 
-                # Pad crop to 1024x1024 if near edges
-                pad_y = self.crop_size - crop.shape[0]
-                pad_x = self.crop_size - crop.shape[1]
-
-                if pad_x > 0 or pad_y > 0:
-                    crop = cv2.copyMakeBorder(
-                        crop,
-                        0, pad_y,
-                        0, pad_x,
-                        cv2.BORDER_CONSTANT,
-                        value=[0, 0, 0]  # Black padding
-                    )
-                
-                crop = img_x[y_1:y_2, x_1:x_2]
-
                 if torch.cuda.is_available():
-                    #output of superres model is 4x the original image 
-                    crop_x4=self.model_superres.enhance(crop)
-                    self.crop_size = 1024
-                    #downsize the image back to its original form
-                    crop=cv2.resize(crop_x4, (self.crop_size,self.crop_size), interpolation = cv2.INTER_AREA)
-                    #Superresolution of image
+                    # Super-resolution enhancement (4x), then downsized back
+                    # to this crop's own native size -- sharpens detail
+                    # without altering the crop's actual pixel dimensions.
+                    # UNetInference tiles at native resolution (no fixed
+                    # working size), so the saved crop must preserve its own
+                    # box-derived size, not be forced to any fixed square.
+                    orig_h, orig_w = crop.shape[:2]
+                    crop_x4 = self.model_superres.enhance(crop)
+                    crop = cv2.resize(crop_x4, (orig_w, orig_h), interpolation=cv2.INTER_AREA)
 
                 cv2.imwrite(self.path_save_x+f'/{n}-crop-{image[:-4]}.png', crop)
         
@@ -850,7 +693,7 @@ class Gui():
         germ_predictor.predict_folder(image_dir="data/images/", output_dir="data/predict/", label="4")
 
         # Initialize angle data
-        angle_df = pd.DataFrame(columns=["filename", "seedling_id", "angles", "tot_numb"])
+        angle_df = pd.DataFrame(columns=["filename", "seedling_id", "angles", "tot_numb", "states"])
         image_crops_angles = {}
         image_crops_angles_max = {}
 
@@ -864,97 +707,34 @@ class Gui():
         debug_data_batch = {}
         total_files = len(self.cropped_sorted_filenames)
 
-        cotyl_time_series_contours = []
-        germ_time_series_contours = []
+        self.reset_frame_accumulators()
 
         for idx, file_name in enumerate(self.cropped_sorted_filenames):
             self.progress_reporter.report(value=30 + int((idx / total_files) * 70))
             print(file_name)
 
             crop_id = int(file_name[0])
-            image_path = os.path.join("data/images", file_name)
-            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            result = self.process_single_frame(file_name, crop_id)
+            if result is None:
+                continue
 
-            cotyl_mask_path = f"data/predict/{file_name[:-4]}-1.png"
-            hypo_mask_path = f"data/predict/{file_name[:-4]}-2.png"
-            germ_mask_path = f"data/predict/{file_name[:-4]}-4.png"
+            hook = result["hook"]
+            seed_ids = result["seed_ids"]
+            angle_list = result["angle_list"]
+            angle_dict = result["angle_dict"]
+            state_list = result["state_list"]
 
-            img_cotyl = cv2.imread(cotyl_mask_path, cv2.IMREAD_GRAYSCALE)
-            img_hypo = cv2.imread(hypo_mask_path, cv2.IMREAD_GRAYSCALE)
-
-            img_germ = cv2.imread(germ_mask_path, cv2.IMREAD_GRAYSCALE)
-
-            if image is None or img_cotyl is None or img_hypo is None:
-                print(f"[WARNING] Skipping {file_name}: image or masks not found.")
-
-            # Process masks
-            _, bin_cotyl = cv2.threshold(img_cotyl, 127, 255, cv2.THRESH_BINARY)
-            _, bin_hypo = cv2.threshold(img_hypo, 127, 255, cv2.THRESH_BINARY)
-            _, bin_germ = cv2.threshold(img_germ, 127, 255, cv2.THRESH_BINARY)
-
-            seed_points = self.crop_points_distributed[crop_id]
-            seed_ids = self.crop_points_numberID[crop_id]
-
-            above_mask = cv2.bitwise_not(mask_below_seed_line(img_hypo.shape, seed_points))
-
-            cotyl_mask = cv2.bitwise_and(cv2.bitwise_not(bin_cotyl), cv2.bitwise_not(bin_cotyl), mask=above_mask)
-            hypo_mask = cv2.bitwise_and(cv2.bitwise_not(bin_hypo), cv2.bitwise_not(bin_hypo), mask=above_mask)
-            
-            # Define kernel for morphological operations
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-
-            # Apply erosion and dilation
-            cotyl_mask = cv2.erode(cotyl_mask, kernel, iterations=1)
-            cotyl_mask = cv2.dilate(cotyl_mask, kernel, iterations=1)
-
-            hypo_mask = cv2.erode(hypo_mask, kernel, iterations=1)
-            hypo_mask = cv2.dilate(hypo_mask, kernel, iterations=1)
-
-            cotyl_mask = PostprocessMasks.zoom_out_mask(cotyl_mask, scale=0.98)
-            hypo_mask = PostprocessMasks.zoom_out_mask(hypo_mask, scale=0.98)
-            germ_mask = PostprocessMasks.zoom_out_mask(bin_germ, scale=0.98)
-
-            # Extract contours
-            cotyl_contours = [c for c in cv2.findContours(cotyl_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
-            hypo_contours = [c for c in cv2.findContours(hypo_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
-            germ_contours = [c for c in cv2.findContours(germ_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
-
-            cotyl_time_series_contours.append(cotyl_contours)
-            germ_time_series_contours.append(germ_contours)
-
-            print(f"Seed points: {seed_points}")
-            print(f"Cotyl contours: {len(cotyl_contours)} | Hypo contours: {len(hypo_contours)}")
-
-            # Apical hook angle computation
-            hook = ApicalHook(
-                img_name=file_name,
-                time_series_contours = cotyl_time_series_contours,
-                germ_time = germ_time_series_contours,
-                hypo_mask=hypo_mask,
-                seedling_points=seed_points,
-                point_ids=seed_ids,
-                image=image,
-                )
-
-            hook.process()
             hook.save(f"data/final_prediction/{file_name}")
-            angle_dict = hook.get_angles()
-
-            self.angle_handler = AngleDictHandler()
-            # angle_dict = self.angle_handler._parse_angle_list(angles_raw)  # Uses internal method for cleaning
             print(f"Angles found for {seed_ids}: {angle_dict}")
 
-            # Build old-style angle list aligned with seed_ids
-            angle_list = []
-            for sid in seed_ids:
-                angle = angle_dict.get(sid, '-')
-                if isinstance(angle, (int, float)) and not np.isnan(angle):
-                    angle_list.append(round(angle))
-                else:
-                    angle_list.append('-')  # Or use np.nan
+            # Mirrors segment_single_seedling/SeedlingAnalysisWindow's own
+            # bookkeeping, so a seedling already segmented by this batch pass
+            # isn't redundantly re-segmented by "Preview seedling"/"Export results".
+            self.frame_results_by_crop.setdefault(crop_id, []).append(result)
+            self.cropped_filenames_by_crop.setdefault(crop_id, []).append(file_name)
 
             # Save old-style format
-            row = pd.DataFrame([[file_name, seed_ids, angle_list, seed_ids]],
+            row = pd.DataFrame([[file_name, seed_ids, angle_list, seed_ids, state_list]],
                                columns=angle_df.columns)
             angle_df = pd.concat([angle_df, row], ignore_index=True)
 
@@ -966,33 +746,10 @@ class Gui():
                     if sid not in max_dict or angle > max_dict.get(sid, float('-inf')):
                         max_dict[sid] = angle
 
-
-         #    # Update max angles per seedling
-         #    # Store angle dict in crop map
-         #    image_crops_angles[crop_id] = angle_dict
-# 
-         #    # Step 8: Update max angles per seedling
-         #    max_dict = image_crops_angles_max.setdefault(crop_id, {})
-         #    for sid, angle in angle_dict.items():
-         #        if isinstance(angle, (int, float)) and not np.isnan(angle):
-         #            if sid not in max_dict or angle > max_dict.get(sid, float('-inf')):
-         #                max_dict[sid] = angle
-# 
-         #    # Step 9: Save new row to angle_df
-         #    row = pd.DataFrame([[file_name, seed_ids, str(angle_dict), seed_ids]],
-         #                       columns=angle_df.columns)
-         #    angle_df = pd.concat([angle_df, row], ignore_index=True)
-
-        # Germination time-zero per seedling, from the germ_v1 mask time series.
-        # germ_time_series_contours accumulates one entry per (crop_id, filename)
-        # iteration above, crop_id-major (outer loop), so each seedling's own
-        # frames form a contiguous num_frames-sized block.
-        num_frames = len(self.file_list)
-        self.germination_detector = GerminationDetector(crop_size=self.crop_size)
+        # Germination time-zero per seedling, from the germ_v1 mask time series
+        # process_single_frame accumulated above, keyed by crop_id.
         for crop_id in range(len(self.transformed_mid_points)):
-            frame_contours = germ_time_series_contours[crop_id * num_frames:(crop_id + 1) * num_frames]
-            seed_point = self.crop_points_distributed[crop_id][0]
-            self.germination_detector.detect(crop_id, frame_contours, seed_point)
+            self._ensure_germination_detected(crop_id)
         print(f"Germination time-zero per seedling: {self.germination_detector.germination_frame}")
 
         # Step 9: Save results
@@ -1005,6 +762,330 @@ class Gui():
 
         self.save_data()
 
+    def reset_frame_accumulators(self, crop_id=None):
+        """Clears the per-crop_id contour history process_single_frame builds
+        up as it walks a seedling's frames in order (ApicalHook/GerminationDetector
+        need it in time order, so a fresh run mustn't append onto a stale one)."""
+        if crop_id is None:
+            self.cotyl_time_series_by_crop = {}
+            self.germ_time_series_by_crop = {}
+        else:
+            self.cotyl_time_series_by_crop[crop_id] = []
+            self.germ_time_series_by_crop[crop_id] = []
+
+    def _ensure_germination_detected(self, crop_id):
+        """Runs Phase 4's germination time-zero detection for one seedling,
+        against whatever germ contour history process_single_frame has
+        accumulated for it so far (self.germ_time_series_by_crop[crop_id]).
+        Callable from any of the three places a seedling's frames get
+        processed -- the "Start Analysis" batch, "Preview seedling", and
+        "Export results" -- so germination time-zero isn't only ever known
+        for seedlings that went through a full batch run. Safe to call more
+        than once for the same seedling (e.g. previewed with fewer frames,
+        then later re-segmented with more via Export results): each call
+        just re-detects against the current, possibly fuller, history."""
+        if self.germination_detector is None:
+            self.germination_detector = GerminationDetector()
+        frame_contours = self.germ_time_series_by_crop.get(crop_id, [])
+        seed_point = self.crop_points_distributed[crop_id][0]
+        box = self.crop_boxes[crop_id]
+        # This seedling's own crop's pixel size -- crops keep their native,
+        # box-derived dimensions (not resized to a shared fixed working
+        # size), so the proximity radius/area threshold must scale per
+        # seedling instead of assuming one global crop size.
+        crop_size = (2 * box["half_w"] + 2 * box["half_h"]) / 2
+        self.germination_detector.detect(crop_id, frame_contours, seed_point, crop_size)
+
+    def _ensure_crop_points(self, crop_id):
+        """Lazily computes crop_points_distributed[crop_id]/crop_points_numberID[crop_id]
+        from just that seedling's own box + start point, so the on-demand preview
+        path (segment_single_seedling/process_single_frame) doesn't depend on the
+        full "Start Analysis" batch (start_analysis's MatchCropPoints/point_num)
+        having run first. Valid because crop boxes are 1:1 with seedling start
+        points by construction (Phase 2) -- this is the same math MatchCropPoints
+        does per box, with no cross-seedling dependency.
+
+        No rescaling is applied: the saved crop keeps this box's own native
+        pixel dimensions (it is not resized to any fixed working size), so
+        the point's position relative to the box's own origin is exactly its
+        position in the saved crop file."""
+        while len(self.crop_points_distributed) <= crop_id:
+            self.crop_points_distributed.append(None)
+            self.crop_points_numberID.append(None)
+        if self.crop_points_distributed[crop_id] is not None:
+            return
+
+        box = self.crop_boxes[crop_id]
+        px, py = self.seedling_pairs[crop_id]["start"]
+        x1, y1 = box["cx"] - box["half_w"], box["cy"] - box["half_h"]
+        self.crop_points_distributed[crop_id] = [(int(round(px - x1)), int(round(py - y1)))]
+        self.crop_points_numberID[crop_id] = [crop_id + 1]
+
+    def process_single_frame(self, file_name, crop_id, frame_index=None):
+        """
+        Mask load -> threshold -> erode/dilate -> contour -> ApicalHook.process()
+        for one already-cropped, already-segmented frame. Shared by the full
+        batch pipeline (run_apical_pipeline) and the Phase 5 per-seedling
+        preview window, so both compute angles identically.
+
+        Masks are loaded via resolve_mask_path(), which prefers a Phase 7
+        brush-edited mask in data/postprocess/ over the raw data/predict/
+        prediction when one exists -- this is the only hook Phase 7's
+        "recompute after a manual mask edit" needs; the rest of this method
+        (threshold/erode/dilate/contour) is unchanged either way.
+
+        By default (frame_index=None) this appends onto
+        self.cotyl_time_series_by_crop[crop_id]/germ_time_series_by_crop[crop_id],
+        for callers walking a seedling's frames in order from the start
+        (reset_frame_accumulators(crop_id) first for a fresh run). Passing
+        frame_index instead REPLACES that one entry in place -- used by
+        Phase 7's "Recompute angle" button, which reprocesses a single
+        already-processed frame after an edit without disturbing the frames
+        around it or duplicating history entries.
+
+        Returns None if the image or a required mask is missing, else a dict
+        with the ApicalHook instance, angle results, and the frame's masks
+        (for a caller that wants to render an overlay preview).
+        """
+        self._ensure_crop_points(crop_id)
+
+        image_path = os.path.join("data/images", file_name)
+        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+
+        img_cotyl = cv2.imread(resolve_mask_path(file_name, "1"), cv2.IMREAD_GRAYSCALE)
+        img_hypo = cv2.imread(resolve_mask_path(file_name, "2"), cv2.IMREAD_GRAYSCALE)
+        img_germ = cv2.imread(resolve_mask_path(file_name, "4"), cv2.IMREAD_GRAYSCALE)
+
+        if image is None or img_cotyl is None or img_hypo is None:
+            print(f"[WARNING] Skipping {file_name}: image or masks not found.")
+            return None
+
+        # Process masks
+        _, bin_cotyl = cv2.threshold(img_cotyl, 127, 255, cv2.THRESH_BINARY)
+        _, bin_hypo = cv2.threshold(img_hypo, 127, 255, cv2.THRESH_BINARY)
+        bin_germ = cv2.threshold(img_germ, 127, 255, cv2.THRESH_BINARY)[1] if img_germ is not None else None
+
+        seed_points = self.crop_points_distributed[crop_id]
+        seed_ids = self.crop_points_numberID[crop_id]
+
+        above_mask = cv2.bitwise_not(mask_below_seed_line(img_hypo.shape, seed_points))
+
+        cotyl_mask = cv2.bitwise_and(cv2.bitwise_not(bin_cotyl), cv2.bitwise_not(bin_cotyl), mask=above_mask)
+        hypo_mask = cv2.bitwise_and(cv2.bitwise_not(bin_hypo), cv2.bitwise_not(bin_hypo), mask=above_mask)
+
+        # Define kernel for morphological operations
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+
+        # Apply erosion and dilation
+        cotyl_mask = cv2.erode(cotyl_mask, kernel, iterations=1)
+        cotyl_mask = cv2.dilate(cotyl_mask, kernel, iterations=1)
+
+        hypo_mask = cv2.erode(hypo_mask, kernel, iterations=1)
+        hypo_mask = cv2.dilate(hypo_mask, kernel, iterations=1)
+
+        cotyl_mask = PostprocessMasks.zoom_out_mask(cotyl_mask, scale=0.98)
+        hypo_mask = PostprocessMasks.zoom_out_mask(hypo_mask, scale=0.98)
+        germ_mask = PostprocessMasks.zoom_out_mask(bin_germ, scale=0.98) if bin_germ is not None else None
+
+        # Extract contours
+        cotyl_contours = [c for c in cv2.findContours(cotyl_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
+        hypo_contours = [c for c in cv2.findContours(hypo_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
+        germ_contours = ([c for c in cv2.findContours(germ_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
+                          if germ_mask is not None else [])
+
+        cotyl_history = self.cotyl_time_series_by_crop.setdefault(crop_id, [])
+        germ_history = self.germ_time_series_by_crop.setdefault(crop_id, [])
+
+        if frame_index is None:
+            cotyl_history.append(cotyl_contours)
+            germ_history.append(germ_contours)
+            # ApicalHook only ever reads time_series_contours[-1] (see
+            # RegionMatcher), so the full running history is fine here.
+            cotyl_history_for_hook = cotyl_history
+            germ_history_for_hook = germ_history
+        else:
+            cotyl_history[frame_index] = cotyl_contours
+            germ_history[frame_index] = germ_contours
+            # Truncate to end at this frame, so ApicalHook's [-1] lookup sees
+            # the just-recomputed contours instead of whatever came after it.
+            cotyl_history_for_hook = cotyl_history[:frame_index + 1]
+            germ_history_for_hook = germ_history[:frame_index + 1]
+
+        print(f"Seed points: {seed_points}")
+        print(f"Cotyl contours: {len(cotyl_contours)} | Hypo contours: {len(hypo_contours)}")
+
+        # Apical hook angle computation
+        hook = ApicalHook(
+            img_name=file_name,
+            time_series_contours=cotyl_history_for_hook,
+            germ_time=germ_history_for_hook,
+            hypo_mask=hypo_mask,
+            seedling_points=seed_points,
+            point_ids=seed_ids,
+            image=image,
+            )
+
+        hook.process()
+        angle_dict = hook.get_angles()
+        state_dict = hook.get_states()
+
+        # Build old-style angle list aligned with seed_ids
+        angle_list = []
+        for sid in seed_ids:
+            angle = angle_dict.get(sid, '-')
+            if isinstance(angle, (int, float)) and not np.isnan(angle):
+                angle_list.append(round(angle))
+            else:
+                angle_list.append('-')  # Or use np.nan
+
+        # Bio state (Open/Closed/Overhooked) per seedling, aligned with
+        # seed_ids the same way angle_list is -- Phase 8's kinematics graph
+        # color-codes points by this.
+        state_list = [state_dict.get(sid, '-') for sid in seed_ids]
+
+        return {
+            "hook": hook,
+            "angle_dict": angle_dict,
+            "angle_list": angle_list,
+            "state_dict": state_dict,
+            "state_list": state_list,
+            "seed_ids": seed_ids,
+            "cotyl_mask": cotyl_mask,
+            "hypo_mask": hypo_mask,
+            "germ_mask": germ_mask,
+        }
+
+    def crop_single_seedling(self, crop_id):
+        """
+        Crops just this one seedling's time series (same naming convention as
+        the batch crop loop in start_analysis: "{crop_id}-crop-{filename}.png"),
+        so the Phase 5 preview window can inspect one seedling before the full
+        "Start Analysis" batch has run.
+        """
+        preprocess_init = preprocess_images()
+        box = self.crop_boxes[crop_id]
+        cropped_filenames = []
+
+        for image in self.file_list:
+            img_path = os.path.join(self.path, image)
+            img_x = cv2.imread(img_path)
+            img_x = preprocess_init.preprocess(img_x)
+
+            center_x, center_y = box["cx"], box["cy"]
+            x_1 = max(0, center_x - box["half_w"])
+            y_1 = max(0, center_y - box["half_h"])
+            x_2 = min(img_x.shape[1], center_x + box["half_w"])
+            y_2 = min(img_x.shape[0], center_y + box["half_h"])
+
+            crop = img_x[y_1:y_2, x_1:x_2]
+
+            out_name = f"{crop_id}-crop-{image[:-4]}.png"
+            cv2.imwrite(os.path.join(self.path_save_x, out_name), crop)
+            cropped_filenames.append(out_name)
+
+        return cropped_filenames
+
+    def segment_single_seedling(self, crop_id, progress_reporter=None):
+        """
+        Crops (if needed) and runs UNetInference scoped to just this one
+        seedling's own cropped frames, writing masks into data/predict/ same
+        as the batch pipeline -- lets a Phase 5 preview window spot-check one
+        seedling without running inference over every other seedling too.
+        Runs on a background thread; progress_reporter must be a
+        ProgressReporter the caller polls on the main thread.
+        """
+        reporter = progress_reporter or self.progress_reporter
+
+        reporter.report(message=f"Cropping seedling {crop_id}...")
+        self.reset_frame_accumulators(crop_id)
+        cropped_filenames = self.crop_single_seedling(crop_id)
+        file_paths = [os.path.join("data/images", f) for f in cropped_filenames]
+
+        # cotyledon_v3's output ("-3.png") isn't read by process_single_frame
+        # in the batch pipeline either -- skipped here to keep the on-demand
+        # preview from running a model whose result nothing consumes.
+        reporter.report(message="Running segmentation models...")
+        cotyledon_predictor = UNetInference(model_path="weights/RootPainter_weights/cotyledon_v5.pkl")
+        hypocot_predictor = UNetInference(model_path="weights/RootPainter_weights/hypocot_v5.pkl")
+        germ_predictor = UNetInference(model_path="weights/RootPainter_weights/germ_v1.pkl")
+
+        cotyledon_predictor.predict_files(file_paths, output_dir="data/predict/", label="1")
+        hypocot_predictor.predict_files(file_paths, output_dir="data/predict/", label="2")
+        germ_predictor.predict_files(file_paths, output_dir="data/predict/", label="4")
+
+        reporter.report(message="Computing angles...")
+        return cropped_filenames
+
+    def open_seedling_picker(self):
+        """Phase 5: lightweight Toplevel listing each seedling; opens a
+        SeedlingAnalysisWindow for whichever one the user picks, on demand,
+        rather than spawning a window per seedling all at once."""
+        if not self.crop_boxes:
+            return
+
+        picker = tk.Toplevel(self.root)
+        picker.title("Preview a seedling")
+
+        listbox = tk.Listbox(picker, width=20, height=min(10, len(self.crop_boxes)))
+        for i in range(len(self.crop_boxes)):
+            listbox.insert(tk.END, f"Seedling {i}")
+        listbox.pack(padx=8, pady=8)
+
+        def _open_selected():
+            selection = listbox.curselection()
+            if not selection:
+                return
+            SeedlingAnalysisWindow(self, selection[0])
+
+        listbox.bind("<Double-Button-1>", lambda event: _open_selected())
+        tk.Button(picker, text="Open", command=_open_selected).pack(pady=(0, 8))
+
+    def _export_results(self):
+        """Replaces the removed legacy window's "Save data": consolidates
+        every seedling's current angle data -- including manual overrides and
+        mask-edit recomputes made via SeedlingAnalysisWindow -- into one
+        wide-format (image x seedling) CSV. Runs on a background thread since
+        it may need to segment any seedling never previewed."""
+        self.button_export_results["state"] = tk.DISABLED
+        threading.Thread(target=self._run_export_results).start()
+
+    def _run_export_results(self):
+        n_crops = len(self.crop_boxes)
+        for crop_id in range(n_crops):
+            if crop_id in self.frame_results_by_crop:
+                continue
+            self.progress_reporter.report(message=f"Segmenting seedling {crop_id}...",
+                                           value=int((crop_id / n_crops) * 80))
+            cropped_filenames = self.segment_single_seedling(crop_id, progress_reporter=self.progress_reporter)
+            results = [self.process_single_frame(file_name, crop_id) for file_name in cropped_filenames]
+            self.frame_results_by_crop[crop_id] = results
+            self.cropped_filenames_by_crop[crop_id] = cropped_filenames
+
+        self.progress_reporter.report(message="Detecting germination...", value=85)
+        for crop_id in range(n_crops):
+            self._ensure_germination_detected(crop_id)
+
+        self.progress_reporter.report(message="Building CSV...", value=90)
+        columns = ['img_name'] + list(range(1, n_crops + 1))
+        rows = []
+        for frame_idx, filename in enumerate(self.file_list):
+            row = {'img_name': filename}
+            for crop_id in range(n_crops):
+                seed_id = crop_id + 1
+                frame_results = self.frame_results_by_crop.get(crop_id, [])
+                result = frame_results[frame_idx] if frame_idx < len(frame_results) else None
+                angle = result["angle_dict"].get(seed_id) if result else None
+                row[seed_id] = round(angle) if isinstance(angle, (int, float)) and not np.isnan(angle) else ''
+            rows.append(row)
+        export_df = pd.DataFrame(rows, columns=columns)
+
+        self.progress_reporter.report(value=100, message="Export ready", export_df=export_df, export_done=True)
+
+    def _open_kinematics_window(self):
+        """Phase 8: opens the aggregate kinematics graph, reading whatever is
+        currently in frame_results_by_crop -- works from Start Analysis,
+        Preview seedling, or Export results alike."""
+        KinematicsWindow(self)
 
     """
     Toggle "adjust crop boxes" mode: drag any seedling's corner handles to
@@ -1026,241 +1107,10 @@ class Gui():
             self.root.unbind("<ButtonRelease-1>")
             self.button_start_analysis["state"]=tk.NORMAL
             self.button_preview_seedlings["state"]=tk.NORMAL
+            self.button_export_results["state"]=tk.NORMAL
+            self.button_kinematics["state"]=tk.NORMAL
 
 
-
-    #Converts the crop filename to the original filename
-    def convert_filename(self, filename):
-        filename_n=filename[7:-4]+self.img_format
-        return(filename_n)
-    
-    def update_listbox_for_angles_miss(self, file_name):
-        """Updates image label, angle data, and listbox display for a given filename using AngleDictHandler."""
-        width, height = 200, 200
-        self.listbox.delete(0, tk.END)
-
-        # Update image label
-        self.current_img_name.destroy()
-        self.current_img_name = tk.Label(self.root, text=file_name[:-4])
-        self.current_img_name.place(x=width + 500, y=height - 160)
-
-        clean_filename = str(file_name).strip()
-
-        if clean_filename not in self.angle_dataframe.index:
-            print(f"[DEBUG] No angle data found for '{clean_filename}' — available keys: {list(self.angle_dataframe.index)}")
-            return False
-        
-        angle_dataframe_x = self.angle_dataframe.loc[[clean_filename]]
-
-        tot_numb = ast.literal_eval(angle_dataframe_x['tot_numb'].tolist()[0])
-
-        # Get angles using handler
-        self.angle_n = self.angle_handler.get_angles_for_image(file_name, tot_numb)
-
-        print("[DEBUG] Angle list for display:")
-        for sid, angle in self.angle_n:
-            print(f"{sid}: {angle}")
-            str1 = f'{sid:<10}{angle}°'
-            self.listbox.insert(tk.END, str1)
-
-        return True
-
-    def update_listbox_for_angles(self, file_name):
-        """Updates image label, angle data, and listbox display for a given filename."""
-        width, height = 200, 200
-        self.listbox.delete(0, tk.END)
-
-        self.current_img_name.destroy()
-        self.current_img_name = tk.Label(self.root, text=file_name[:-4])
-        self.current_img_name.place(x=width + 500, y=height - 160)
-
-        angle_dataframe_x = self.angle_dataframe.loc[self.angle_dataframe['filename'] == file_name]
-        if angle_dataframe_x.empty:
-            print(f"[DEBUG] No angle data found for {file_name}")
-            return False  # signal: skip rendering image
-
-        org_filename = self.convert_filename(file_name)
-        tot_numb = ast.literal_eval(angle_dataframe_x['tot_numb'].tolist()[0])
-        angle_data = self.new_df.loc[self.new_df['img_name'] == org_filename]
-        angle_d = angle_data.squeeze()
-
-        self.angle_n = []
-        for seedling_id_n in tot_numb:
-            try:
-                angle = angle_d.get(int(seedling_id_n), np.nan)
-
-                # If angle is a Series or array, squeeze it down
-                if isinstance(angle, (np.ndarray, pd.Series)):
-                    angle = float(np.squeeze(angle))
-
-                if isinstance(angle, (int, float)) and not np.isnan(angle):
-                    self.angle_n.append((seedling_id_n, int(angle)))
-                else:
-                    self.angle_n.append((seedling_id_n, '-'))
-
-            except Exception as e:
-                print(f"[DEBUG] Error with seedling {seedling_id_n}: {e}")
-                self.angle_n.append((seedling_id_n, '-'))
-
-            print(f"[DEBUG] Raw angle for seedling {seedling_id_n}: {angle_d.get(int(seedling_id_n))}")
-
-
-        print("[DEBUG] Angle list for display:")
-        for ang_n in self.angle_n:
-            print(f"{ang_n[0]}: {ang_n[1]}")
-            str1 = f'{ang_n[0]:<10}{ang_n[1]}°'
-            self.listbox.insert(tk.END, str1)
-
-        return True
-
-    def next_angle_img(self):
-        width, height = 200, 200
-        if self.n_angle_image != self.checker_next_img_limit - 1:
-            self.n_angle_image += 1
-            file_name = self.images_final[self.n_angle_image]
-            if not self.update_listbox_for_angles(file_name):
-                return
-            img_path = self.img_final_folder + file_name
-            img = cv2.imread(img_path, 1)
-            img = cv2.resize(img, (600, 600))
-            self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(img))
-            self.canvas.delete(self.image_on_canvas)
-            self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
-        else:
-            self.save_button['state'] = tk.NORMAL
-
-    def previous_angle_img(self):
-        width, height = 200, 200
-        if self.n_angle_image != 0:
-            self.n_angle_image -= 1
-        if self.n_angle_image < self.checker_next_img_limit:
-            file_name = self.images_final[self.n_angle_image]
-            if not self.update_listbox_for_angles(file_name):
-                return
-            img_path = self.img_final_folder + file_name
-            img = cv2.imread(img_path, 1)
-            img = cv2.resize(img, (600, 600))
-            self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(img))
-            self.canvas.delete(self.image_on_canvas)
-            self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
-
-
-    def openNewWindow(self):
-        #remove buttons
-        self.n_angle_image=0
-        self.listbox.destroy()
-        self.btn_import_image.destroy()
-        self.logo_label.destroy()
-        self.btn_show_image.destroy()
-        self.button_crop.destroy()
-        self.button_place_point.destroy()
-        #self.btn_sort.destroy()
-        #self.sort_txt_box.destroy()
-        #self.sort_start_b.destroy()
-        #self.sort_end_b.destroy()
-        self.label_user_input.destroy()
-        self.label_1.destroy()
-        self.label_2.destroy()
-        self.label_3.destroy()
-        self.progress.destroy()
-        self.button_start_analysis.destroy()
-        self.check_button_debug.destroy()
-        self.progress_bar_label.destroy()
-
-        self.fin.destroy()
-
-        width=200
-        height=200
-        self.fin = tk.Frame(self.root, width=200, height=200)
-        self.fin.pack()
-        self.fin.place(x=20, y=20)
-        self.canvas = tk.Canvas(self.fin, bg='#FFFFFF', width=600, height=600)
-        self.canvas.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
-
-
-        label_rotate=tk.Label(self.root, text ='Cotyledon rotation')
-        label_rotate.place(x=width + 465, y=height + 256)
-        self.btn_blank_angle = tk.Button(self.root, text="Cotyledon in rotation", command=self.blank_angle)
-        self.btn_blank_angle.place(x=width + 450, y=height + 281)
-
-        label_show_image=tk.Label(self.root, text ='Use the arrows to navigate\n through image time points')
-        label_show_image.place(x=width + 450, y=height + 320)
-        
-
-        self.buttonNext_angle_img = tk.Button(self.root, text="-->", width=4, command=self.next_angle_img)
-        self.buttonNext_angle_img.place(x=width + 520, y=height + 355)
-
-
-        self.buttonPrevious_angle_img = tk.Button(self.root, text="<--", width=4, command=self.previous_angle_img)
-        self.buttonPrevious_angle_img.place(x=width + 480, y=height + 355)
-        
-        self.save_button = tk.Button(self.root, text="Save data", width=15, command=self.save_csv_data)
-        self.save_button.place(x=width + 460, y=height + 400)
-        self.save_button['state']=tk.DISABLED
-
-
-        label_manual_ang=tk.Label(self.root, text ='Manual angle :')
-        label_manual_ang.place(x=width + 460, y=height + 115)
-
-        self.overhook_var=tk.IntVar()
-        self.check_button_overhook= tk.Checkbutton(self.root, text='Overhook',variable=self.overhook_var)
-        self.check_button_overhook.place(x=width + 460, y=height + 150)
-
-        self.buttonPlace_angle = tk.Button(self.root, text="Place angle", width=15, command=self.activate_manual_ang)
-        self.buttonPlace_angle.place(x=width + 460, y=height + 180)
-        self.buttonReplace_angle = tk.Button(self.root, text="Replace angle", width=15, command=self.replace_angle)
-        self.buttonReplace_angle.place(x=width + 460, y=height + 210)
-
-
-        Label_img_name = tk.Label(self.root,text ='Image :')
-        Label_img_name.place(x=width +450, y=height - 160)
-
-        Label_seedling = tk.Label(self.root,text ='#Seedling')
-        Label_seedling.place(x=width + 450, y=height - 120)
-        Label_seedling_angle = tk.Label(self.root,text ='Angle')
-        Label_seedling_angle.place(x=width + 515, y=height - 120)
-
-
-        self.listbox = tk.Listbox(self.root, width=22, height=12)
-        self.listbox.place(x=width + 450, y=height - 100)
-        self.img_final_folder='data/final_prediction/'
-        self.images_final=self.cropped_sorted_filenames
-
-
-        self.checker_next_img_limit=len(self.images_final)
-        self.angle_dataframe=pd.read_csv('img_angle_data.csv')
-
-        first_image = self.images_final[0]
-
-        # Display image name label
-        self.current_img_name = tk.Label(self.root, text=first_image[:-4])
-        self.current_img_name.place(x=width + 500, y=height - 160)
-
-        # Update listbox and angle values using shared method
-        success = self.update_listbox_for_angles(first_image)
-        if not success:
-            print(f"[DEBUG] No angle data found for {first_image}")
-            return
-
-        # Load and display image on canvas
-        img_path = self.img_final_folder + first_image
-        img = cv2.imread(img_path, 1)
-        img = cv2.resize(img, (600, 600))
-        self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(img))
-        self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
-
-        self.root.geometry("%dx%d+0+0" % (825, 650))
-        # self.root.mainloop()
-
-    def save_csv_data(self):
-        file_formate=[('CSV-file','*.csv')]
-        save_file_path = asksaveasfilename(filetypes= file_formate, defaultextension=file_formate)
-        self.new_df.to_csv(save_file_path, index=False)
-        """
-        This function formats the data in the final form and save it to the path that the user gives.
-        The data is saved with the filenames(timepoints) as the first  column, the rest of the columns represents
-        each seedling-id-number 
-        """
 
     def save_data(self):
         df = pd.read_csv('img_angle_data.csv')
@@ -1328,126 +1178,6 @@ class Gui():
             row_dict = dict(zip(main_ids[n], main_ang[n]))
             row_df = pd.DataFrame([row_dict])
             self.new_df = pd.concat([self.new_df, row_df], ignore_index=True)
-
-
-    def save_data_2(self):
-        df=pd.read_csv('img_angle_data.csv')
-
-        file_names=df['filename'].tolist()
-
-        files=self.file_list
-        crops=[n for n in range(len(self.transformed_mid_points))]
-
-        img_num=(len(file_names)/len(crops))
-        img_name_matrix=[['' for n in range(len(crops))] for i in range(int(img_num))]
-
-        crop_filenames=[n for n in range(len(file_names))]
-        for n in range(int(img_num)):
-            filename_index=crop_filenames[n::int(img_num)]
-            for i,index in enumerate(filename_index):
-                img_name_matrix[n][i]=file_names[index]
-
-        new_list=df['tot_numb'].iloc[-1]
-        new_list = ast.literal_eval(new_list)
-        last_seedling_id=new_list[-1]
-        data=['img_name']
-        for n in range(1, last_seedling_id+1):
-            data.append(n)
-
-        new_list=df['tot_numb'].iloc[-1]
-        new_list = ast.literal_eval(new_list)
-        last_seedling_id=new_list[-1]
-        data=['img_name']
-        for n in range(1, last_seedling_id+1):
-            data.append(n)
-
-        self.new_df=pd.DataFrame(columns=data)
-        main_ang=[]
-        main_ids=[]
-        for n,element in enumerate(img_name_matrix):
-            angle_data=[files[n]]
-            seedling_ids_list=['img_name']
-            for name in element:
-                df_n=df.loc[df['filename']==name]
-                angles=df_n['angles'].tolist()
-                angles=angles[0]
-                angles=ast.literal_eval(angles)
-                angle_data=angle_data+angles
-                
-                seedling_ids=df_n['seedling_id'].tolist()
-                seedling_ids=seedling_ids[0]
-                seedling_ids=ast.literal_eval(seedling_ids)
-                seedling_ids_list=seedling_ids_list+seedling_ids
-            main_ang.append(angle_data)
-            main_ids.append(seedling_ids_list)
-        for n in range(len(img_name_matrix)):
-            zip_iterator = zip(main_ids[n], main_ang[n])
-            a_dictionary = dict(zip_iterator)
-            row_df = pd.DataFrame([a_dictionary])
-            self.new_df = pd.concat([self.new_df, row_df], ignore_index=True) # Pandas 2.0 removed method df.append(), use pd.concat()
-
-    def save_data_archive(self):
-        df=pd.read_csv('img_angle_data.csv')
-
-        file_names=df['filename'].tolist()
-
-        files=self.file_list
-        crops=[n for n in range(len(self.transformed_mid_points))]
-
-        img_num=(len(file_names)/len(crops))
-
-        img_name_matrix=[['' for n in range(len(crops))] for i in range(int(img_num))]
-
-        crop_filenames=[n for n in range(len(file_names))]
-        for n in range(int(img_num)):
-            filename_index=crop_filenames[n::int(img_num)]
-            for i,index in enumerate(filename_index):
-                img_name_matrix[n][i]=file_names[index]
-
-        new_list=df['tot_numb'].iloc[-1]
-        print(f"[INFO] seedling id {new_list}")
-
-        new_list = ast.literal_eval(new_list)
-        last_seedling_id=new_list[-1]
-        data=['img_name']
-        for n in range(1, last_seedling_id+1):
-            data.append(n)
-
-
-
-        new_list=df['tot_numb'].iloc[-1]
-        new_list = ast.literal_eval(new_list)
-        last_seedling_id=new_list[-1]
-        data=['img_name']
-        for n in range(1, last_seedling_id+1):
-            data.append(n)
-
-
-        self.new_df=pd.DataFrame(columns=data)
-        main_ang=[]
-        main_ids=[]
-        for n,element in enumerate(img_name_matrix):
-            angle_data=[files[n]]
-            seedling_ids_list=['img_name']
-            for name in element:
-                df_n=df.loc[df['filename']==name]
-                angles=df_n['angles'].tolist()
-                angles=angles[0]
-                angles=ast.literal_eval(angles)
-                angle_data += list(angles.items())
-                
-                seedling_ids=df_n['seedling_id'].tolist()
-                seedling_ids=seedling_ids[0]
-                seedling_ids=ast.literal_eval(seedling_ids)
-                seedling_ids_list=seedling_ids_list+seedling_ids
-            main_ang.append(angle_data)
-            main_ids.append(seedling_ids_list)
-        for n in range(len(img_name_matrix)):
-            zip_iterator = zip(main_ids[n], main_ang[n])
-            a_dictionary = dict(zip_iterator)
-            row_df = pd.DataFrame([a_dictionary])
-            self.new_df = pd.concat([self.new_df, row_df], ignore_index=True) # Pandas 2.0 removed method df.append(), use pd.concat()
-            #self.new_df = self.new_df.append(a_dictionary, ignore_index=True)
 
 
     def add_files(self, path_input=None):
@@ -1574,6 +1304,4 @@ if __name__== '__main__':
     remove_files_exit()
     root=tk.Tk()
     gui=Gui(root)
-    w, h = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.geometry("%dx%d+0+0" % (1280, 700))
     root.mainloop()

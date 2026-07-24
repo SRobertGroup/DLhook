@@ -23,9 +23,10 @@ class ApicalHook:
 
         self.matches = []
         self.angles = {}
+        self.states = {}
 
     def process(self):
-       
+
         self.matches = self.matcher.match()
 
         print(f"Matched {len(self.matches)} cotyledon-hypocotyl pairs")
@@ -38,6 +39,7 @@ class ApicalHook:
                 continue
             print(f"Angle = {angle_diff_2:.2f}°, Type = {bio_state}")
             self.angles[match.stem_id] = angle_diff_2
+            self.states[match.stem_id] = bio_state
             self.visualizer.draw_match(match, angle_diff_2)
             # Draw all cotyls and seedling points
             self.visualizer.draw_all_cotyls_and_seed_ids(
@@ -51,6 +53,9 @@ class ApicalHook:
 
     def get_angles(self):
         return self.angles
+
+    def get_states(self):
+        return self.states
 
 @dataclass
 class EllipseMatch:
@@ -247,7 +252,10 @@ class AngleCalculator:
             angle = 180-angle
         elif insert_y[1] > max(yc, ys):
             bio_state = "Overhooked"
-            angle -= 180
+            # Continuous 0-360 scale with 180 = closed: Overhooked means the
+            # cotyledon has rotated past closed, so this should read >180, not
+            # negative (the old `angle -= 180` produced negative numbers).
+            angle = 360 - angle
         else:
             bio_state = "Open"
 

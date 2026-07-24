@@ -135,9 +135,6 @@ class Gui():
         width=self.x_length
         height=self.y_length
         self.sidebar_width=300
-        self.bottom_bar_height=60
-        self.win_width=self.x_length + self.sidebar_width
-        self.win_height=self.y_length + self.bottom_bar_height
 
         self.filenames_listbox=False
 
@@ -153,8 +150,6 @@ class Gui():
         self.root.iconphoto(False, self.icon_img)
         # self.root.iconbitmap("@data/logo/icon.xbm")
         self.root.title('DLhook')
-        self.root.geometry(f"{self.win_width}x{self.win_height}")
-        self.root.resizable(False, False)
 
         # --- Canvas (left) ---
         self.canvas_frame = tk.Frame(self.root, width=width, height=height)
@@ -166,7 +161,6 @@ class Gui():
         # --- Sidebar (right) ---
         self.sidebar_frame = tk.Frame(self.root, width=self.sidebar_width)
         self.sidebar_frame.grid(row=0, column=1, sticky="n", padx=10, pady=10)
-        self.sidebar_frame.grid_propagate(False)
 
         sidebar_row = 0
         self.btn_import_image = tk.Button(self.sidebar_frame, text="Open image directory", width=17, command=self.add_files)
@@ -194,7 +188,7 @@ class Gui():
         step2_frame.grid(row=sidebar_row, column=0, sticky="w", pady=4); sidebar_row += 1
         self.label_2 = tk.Label(step2_frame, text = "2.")
         self.label_2.pack(side=tk.LEFT)
-        self.button_crop = tk.Button(step2_frame, text="Crop image", width=10, command=self.crop_image)
+        self.button_crop = tk.Button(step2_frame, text="Adjust crop", width=11, command=self.crop_image)
         self.button_crop.pack(side=tk.LEFT, padx=(6, 0))
         self.button_crop["state"]=tk.DISABLED
 
@@ -218,12 +212,17 @@ class Gui():
         step5_frame.grid(row=sidebar_row, column=0, sticky="w", pady=4); sidebar_row += 1
         self.label_5 = tk.Label(step5_frame, text = "5.")
         self.label_5.pack(side=tk.LEFT)
-        self.button_export_results = tk.Button(step5_frame, text="Export results", width=13, command=self._export_results)
-        self.button_export_results.pack(side=tk.LEFT, padx=(6, 0))
-        self.button_export_results["state"]=tk.DISABLED
         self.button_kinematics = tk.Button(step5_frame, text="Show kinematics", width=13, command=self._open_kinematics_window)
         self.button_kinematics.pack(side=tk.LEFT, padx=(6, 0))
         self.button_kinematics["state"]=tk.DISABLED
+
+        step6_frame = tk.Frame(self.sidebar_frame)
+        step6_frame.grid(row=sidebar_row, column=0, sticky="w", pady=4); sidebar_row += 1
+        self.label_6 = tk.Label(step6_frame, text = "6.")
+        self.label_6.pack(side=tk.LEFT)
+        self.button_export_results = tk.Button(step6_frame, text="Export results", width=13, command=self._export_results)
+        self.button_export_results.pack(side=tk.LEFT, padx=(6, 0))
+        self.button_export_results["state"]=tk.DISABLED
 
         sep = Separator(self.sidebar_frame, orient=tk.HORIZONTAL)
         sep.grid(row=sidebar_row, column=0, sticky="ew", pady=10); sidebar_row += 1
@@ -234,19 +233,25 @@ class Gui():
 
         # --- Load and display the logo ---
         logo_image = Image.open("data/logo/logos.png")
-        logo_image = logo_image.resize((100, 84), resample_filter)  # adjust size if needed
+        logo_image = logo_image.resize((160, 134), resample_filter)  # adjust size if needed
         self.logo_photo = ImageTk.PhotoImage(logo_image)  # keep a reference
 
         self.logo_label = tk.Label(self.sidebar_frame, image=self.logo_photo, borderwidth=0)
         self.logo_label.grid(row=sidebar_row, column=0, sticky="w"); sidebar_row += 1
 
         # --- Bottom bar (progress), spans full window width ---
-        self.bottom_frame = tk.Frame(self.root, height=self.bottom_bar_height)
+        self.bottom_frame = tk.Frame(self.root)
         self.bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
         self.progress_bar_label = tk.Label(self.bottom_frame, text = "Measurement progress:")
         self.progress_bar_label.pack(side=tk.LEFT)
         self.progress = Progressbar(self.bottom_frame, orient=tk.HORIZONTAL, length=700)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Size the window to fit the actual content instead of a guessed size,
+        # so it stays correct regardless of sidebar/logo width tweaks.
+        self.root.update_idletasks()
+        self.root.geometry(f"{self.root.winfo_reqwidth()}x{self.root.winfo_reqheight()}")
+        self.root.resizable(False, False)
 
         # Thread-safe channel for background analysis to report progress back to the GUI
         self.progress_reporter = ProgressReporter()
@@ -938,7 +943,7 @@ class Gui():
             else:
                 angle_list.append('-')  # Or use np.nan
 
-        # Bio state (Open/Closed/Overhooked) per seedling, aligned with
+        # Bio state (Open/Opening/Closed/Overhooked) per seedling, aligned with
         # seed_ids the same way angle_list is -- Phase 8's kinematics graph
         # color-codes points by this.
         state_list = [state_dict.get(sid, '-') for sid in seed_ids]

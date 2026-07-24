@@ -9,6 +9,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 STATE_COLORS = {
     "Closed": "tab:blue",
+    "Opening": "tab:orange",
     "Overhooked": "tab:red",
     "Open": "tab:green",
     "Manual": "tab:purple",
@@ -19,7 +20,7 @@ UNKNOWN_STATE_COLOR = "0.5"
 class KinematicsWindow(tk.Toplevel):
     """
     Phase 8: aggregate view of every seedling's angle over time, points
-    color-coded by bio_state (Open/Closed/Overhooked/Manual).
+    color-coded by bio_state (Open/Opening/Closed/Overhooked/Manual).
 
     Manual-refresh only (confirmed with user) -- reads directly from
     Gui.frame_results_by_crop/time_deltas/germination_detector on each
@@ -54,7 +55,11 @@ class KinematicsWindow(tk.Toplevel):
         n_frames = len(self.gui.file_list) if getattr(self.gui, "file_list", None) else 0
         use_time_deltas = n_frames > 0 and len(self.gui.time_deltas) == n_frames
         if use_time_deltas:
-            x_axis_all = np.array([d if d is not None else np.nan for d in self.gui.time_deltas], dtype=float)
+            x_axis_all = np.array(
+                [np.nan if (d is None or d.get("elapsed_minutes") is None) else d["elapsed_minutes"]
+                 for d in self.gui.time_deltas],
+                dtype=float,
+            )
         else:
             x_axis_all = np.arange(n_frames, dtype=float)
 

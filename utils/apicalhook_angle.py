@@ -15,9 +15,7 @@ class ApicalHook:
         self.seedling_points = seedling_points
         self.cotyl_contours = time_series_contours
         self.germ_time_series = germ_time
-        self.crop_size = image.shape[1]
-        self.search_radius = round(self.crop_size*0.016)
-        self.matcher = RegionMatcher(time_series_contours, hypo_mask, seedling_points, point_ids, search_radius=self.search_radius)
+        self.matcher = RegionMatcher(time_series_contours, hypo_mask, seedling_points, point_ids)
         self.angle_calc = AngleCalculator()
         self.visualizer = ApicalVisualizer(image)
 
@@ -70,18 +68,11 @@ class RegionMatcher:
     def __init__(self, time_series_cotyl_contours: list,
                  hypo_mask: np.ndarray,
                  seedling_points: list[Tuple[int, int]],
-                 point_ids: list[int],
-                 search_radius: int = 10):
+                 point_ids: list[int]):
         self.cotyl_contours = time_series_cotyl_contours[-1]
         self.hypo_mask = hypo_mask
         self.seedling_points = seedling_points
         self.point_ids = point_ids
-        self.radius = search_radius
-
-    def _rectangle(self, cx, cy, r):
-        x1, y1 = max(cx - r, 0), max(cy - 3*r, 0)
-        x2, y2 = min(cx + r, self.hypo_mask.shape[1]), min(cy + 3*r, self.hypo_mask.shape[0])
-        return x1, y1, x2, y2
 
     @staticmethod
     def _assign_ids_by_order(seed_points, seed_ids, cotyl_centers):
@@ -112,6 +103,16 @@ class RegionMatcher:
         valid_cotyls = []
         valid_matches = []
 
+        # Whole-mask contours, found once: each crop is built around a single
+        # start/end seedling pair (see _ensure_crop_points), so the cotyledon
+        # and its hypocotyl already share the same crop -- no per-cotyledon
+        # local window is needed to relate them, and one was actively harmful
+        # (it used to be a fixed 1.6%-of-crop-width radius, which rounds down
+        # to a 1-2px search box on the narrow stem crops this pipeline
+        # produces, missing the hypocotyl entirely).
+        hypo_contours = [cnt for cnt in cv2.findContours(
+            self.hypo_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(cnt) >= 5]
+
         for cotyl_id, contour in enumerate(self.cotyl_contours):
             if len(contour) < 5:
                 continue
@@ -122,25 +123,22 @@ class RegionMatcher:
                 continue
 
             cx, cy = map(int, cotyl_ellipse[0])
-            x1, y1, x2, y2 = self._rectangle(cx, cy, self.radius)
 
-            hypo_crop = self.hypo_mask[y1:y2, x1:x2]
-            contours, _ = cv2.findContours(hypo_crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            valid = [cnt for cnt in contours if len(cnt) >= 5]
-
-            if not valid:
+            if not hypo_contours:
                 continue
 
-            best_cnt = max(valid, key=cv2.contourArea)
+            # Nearest hypocotyl contour to this cotyledon's center -- distance
+            # rather than area so a crop with more than one hypocotyl blob
+            # still pairs each cotyledon with its own stem.
+            best_cnt = min(
+                hypo_contours,
+                key=lambda cnt: abs(cv2.pointPolygonTest(cnt, (float(cx), float(cy)), True))
+            )
 
             try:
-                local_ellipse = cv2.fitEllipse(best_cnt)
+                stem_ellipse = cv2.fitEllipse(best_cnt)
             except cv2.error:
                 continue
-
-            (xc, yc), (MA, ma), angle = local_ellipse
-            global_center = (xc + x1, yc + y1)
-            stem_ellipse = (global_center, (MA, ma), angle)
 
             valid_cotyls.append((cx, cy))
             valid_matches.append({
@@ -185,6 +183,11 @@ class RegionMatcher:
 
     
 class AngleCalculator:
+    # Tunable: raw angle (degrees) below which the Closed/Opening regime is
+    # still labeled "Closed" rather than "Opening". Starting default -- expect
+    # to retune once stabilized angle-vs-time plots are available.
+    CLOSED_ANGLE_THRESHOLD_DEG = 30.0
+
     @staticmethod
     def major_axis_points(center, length, angle_deg):
         if any(map(lambda x: np.isnan(x), [*center, length, angle_deg])):
@@ -223,34 +226,36 @@ class AngleCalculator:
         # 1. Major axis points
         c_pt1, c_pt2, _ = self.major_axis_points((xc, yc), Lc, angle_c)
         s_pt1, s_pt2, _ = self.major_axis_points((xs, ys), Ls, angle_s)
-        insert_y = self.intersection_point(s_pt1, s_pt2, c_pt1, c_pt2)
+        insert_y = np.array(self.intersection_point(s_pt1, s_pt2, c_pt1, c_pt2))
 
-        # 2. Determine upper stem point
         s_pt1 = np.array(s_pt1)
         s_pt2 = np.array(s_pt2)
         c_pt1 = np.array(c_pt1)
         c_pt2 = np.array(c_pt2)
 
-        stem_vec = s_pt2 - s_pt1
-        upper_stem = s_pt2 if stem_vec[1] >= 0 else s_pt1
-        lower_stem = s_pt1 if np.array_equal(upper_stem, s_pt2) else s_pt2
-        stem_vec = upper_stem - lower_stem  # Ensure "upward"
+        # 2. Anchor both endpoint-direction decisions on insert_y (the point
+        # where the stem and cotyledon axes cross) instead of anchoring the
+        # cotyledon's decision on the stem's own endpoint pick. A sign test on
+        # the stem's y-component degenerates -- and is noise-sensitive -- when
+        # the stem is close to horizontal, and the old cotyl tip/base pick
+        # inherited that instability by anchoring on the stem's pick. Distance
+        # to insert_y is orientation-agnostic, so this removes both the
+        # degenerate test and the cascade.
+        stem_base = s_pt1 if np.linalg.norm(s_pt1 - insert_y) >= np.linalg.norm(s_pt2 - insert_y) else s_pt2
+        stem_hook_end = s_pt2 if np.array_equal(stem_base, s_pt1) else s_pt1
+        stem_vec = stem_hook_end - stem_base  # base -> hook end
 
-        # 3. Closest cotyl point to upper stem
-        d1 = np.linalg.norm(np.array(c_pt1) - upper_stem)
-        d2 = np.linalg.norm(np.array(c_pt2) - upper_stem)
-        cotyl_tip = c_pt1 if d1 >= d2 else c_pt2
-        cotyl_base = c_pt1 if d1 < d2 else c_pt2
-        # 4. Insertion vector (cotyl → upper stem)
-        cotyl_vec = np.array(cotyl_tip) - np.array(cotyl_base)
+        cotyl_base = c_pt1 if np.linalg.norm(c_pt1 - insert_y) <= np.linalg.norm(c_pt2 - insert_y) else c_pt2
+        cotyl_tip = c_pt2 if np.array_equal(cotyl_base, c_pt1) else c_pt1
+        cotyl_vec = cotyl_tip - cotyl_base  # attachment -> free tip
 
-        # 5. Reference angle
+        # 3. Reference angle
         angle = abs(self.angle_between_vectors(stem_vec, cotyl_vec))
 
         if insert_y[1] < min(yc, ys):
-            bio_state = "Closed"
+            bio_state = "Closed" if angle < self.CLOSED_ANGLE_THRESHOLD_DEG else "Opening"
             angle = 180-angle
-        elif insert_y[1] > max(yc, ys):
+        elif cotyl_tip[1] > stem_hook_end[1]:
             bio_state = "Overhooked"
             # Continuous 0-360 scale with 180 = closed: Overhooked means the
             # cotyledon has rotated past closed, so this should read >180, not

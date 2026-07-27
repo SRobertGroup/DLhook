@@ -9,7 +9,7 @@ class MaskEditor:
     existing Z-key-undoes-last-action convention (Phase 2's point placement).
     """
 
-    def __init__(self, mask, brush_radius=20):
+    def __init__(self, mask, brush_radius=5):
         self.mask = mask.copy()
         self.brush_radius = brush_radius
         self._undo_stack = []

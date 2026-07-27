@@ -32,6 +32,13 @@ class ZoomableImageCanvas(tk.Canvas):
         self._center_x = 0
         self._center_y = 0
 
+        # Brush preview circle, in image-space (so it stays correctly placed
+        # across zoom changes) -- (img_x, img_y, img_radius, outline_color) or
+        # None when hidden. Stored rather than only drawn on the spot because
+        # _redraw() does delete("all") on every zoom/frame change and must
+        # re-draw it after the image to keep it on top.
+        self._brush_preview = None
+
         self.bind("<MouseWheel>", self._on_mousewheel)  # Windows/macOS
         self.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, ZOOM_STEP))  # Linux scroll up
         self.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / ZOOM_STEP))  # Linux scroll down
@@ -71,6 +78,28 @@ class ZoomableImageCanvas(tk.Canvas):
         self._center_x = w / 2
         self._center_y = h / 2
         self._redraw()
+
+    def set_brush_preview(self, img_x, img_y, img_radius, outline="#ffff00"):
+        """Shows/moves the brush-size preview circle, in image-space
+        coordinates so it tracks the cursor correctly at any zoom level."""
+        self._brush_preview = (img_x, img_y, img_radius, outline)
+        self._draw_brush_preview()
+
+    def clear_brush_preview(self):
+        self._brush_preview = None
+        self.delete("brush_preview")
+
+    def _draw_brush_preview(self):
+        self.delete("brush_preview")
+        if self._brush_preview is None or self._image is None:
+            return
+        img_x, img_y, img_radius, outline = self._brush_preview
+        x1, y1, _, _ = self._visible_bounds()
+        cx = (img_x - x1) * self.zoom
+        cy = (img_y - y1) * self.zoom
+        r = max(1.0, img_radius * self.zoom)
+        self.create_oval(cx - r, cy - r, cx + r, cy + r,
+                          outline=outline, width=2, tags="brush_preview")
 
     def canvas_to_image(self, canvas_x, canvas_y):
         """Maps a canvas pixel coordinate to the image pixel coordinate
@@ -151,3 +180,4 @@ class ZoomableImageCanvas(tk.Canvas):
         self._photo = ImageTk.PhotoImage(image=Image.fromarray(resized))
         self.delete("all")
         self.create_image(offset_x, offset_y, image=self._photo, anchor=tk.NW)
+        self._draw_brush_preview()

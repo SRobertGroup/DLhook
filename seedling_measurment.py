@@ -13,6 +13,7 @@ from tkinter import simpledialog, messagebox
 from models.UNetInference import *  # RootPainter
 # from numpy.lib.function_base import select
 from utils.apicalhook_angle import *
+from utils.angle_timeseries import reconstruct_series, sync_angle_and_state_lists
 from utils.clean_on_exit import *
 from utils.matching_crop2points_GUI import *
 from utils.preprocess_model_input import *
@@ -258,7 +259,7 @@ class Gui():
 
         # --- Bottom bar (progress), spans full window width ---
         self.bottom_frame = tk.Frame(self.root)
-        self.bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        self.bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10)
         self.progress_bar_label = tk.Label(self.bottom_frame, text = "Measurement progress:")
         self.progress_bar_label.pack(side=tk.LEFT)
         self.progress = Progressbar(self.bottom_frame, orient=tk.HORIZONTAL, length=700)
@@ -714,8 +715,6 @@ class Gui():
         hypocot_predictor.predict_folder(image_dir="data/images/", output_dir="data/predict/", label="2")
         germ_predictor.predict_folder(image_dir="data/images/", output_dir="data/predict/", label="4")
 
-        # Initialize angle data
-        angle_df = pd.DataFrame(columns=["filename", "seedling_id", "angles", "tot_numb", "states"])
         image_crops_angles = {}
         image_crops_angles_max = {}
 
@@ -735,16 +734,18 @@ class Gui():
             self.progress_reporter.report(value=30 + int((idx / total_files) * 70))
             print(file_name)
 
-            crop_id = int(file_name[0])
+            # Filenames are "{crop_id}-crop-{original_name}.png" (see
+            # cropped_sorted_filenames above) -- split on the first "-"
+            # rather than indexing the first character, which silently
+            # broke for crop_id >= 10.
+            crop_id = int(file_name.split("-", 1)[0])
             result = self.process_single_frame(file_name, crop_id)
             if result is None:
                 continue
 
             hook = result["hook"]
             seed_ids = result["seed_ids"]
-            angle_list = result["angle_list"]
             angle_dict = result["angle_dict"]
-            state_list = result["state_list"]
 
             hook.save(f"data/final_prediction/{file_name}")
             print(f"Angles found for {seed_ids}: {angle_dict}")
@@ -754,11 +755,6 @@ class Gui():
             # isn't redundantly re-segmented by "Preview seedling"/"Export results".
             self.frame_results_by_crop.setdefault(crop_id, []).append(result)
             self.cropped_filenames_by_crop.setdefault(crop_id, []).append(file_name)
-
-            # Save old-style format
-            row = pd.DataFrame([[file_name, seed_ids, angle_list, seed_ids, state_list]],
-                               columns=angle_df.columns)
-            angle_df = pd.concat([angle_df, row], ignore_index=True)
 
             # Save max angles (this part stays the same)
             image_crops_angles[crop_id] = angle_dict
@@ -774,7 +770,31 @@ class Gui():
             self._ensure_germination_detected(crop_id)
         print(f"Germination time-zero per seedling: {self.germination_detector.germination_frame}")
 
-        # Step 9: Save results
+        # Angle-through-time reconstruction (utils/angle_timeseries.py), one
+        # seedling at a time -- must run after every frame's raw per-frame
+        # angle has been computed above, same requirement as germination
+        # detection just above it.
+        for crop_id in range(len(self.transformed_mid_points)):
+            self._reconstruct_series_for_crop(crop_id)
+
+        # Step 9: Save results -- built from frame_results_by_crop (not
+        # accumulated incrementally in the loop above) so angles/states
+        # reflect the reconstruction just run; raw_angles keeps the original
+        # per-frame geometric reading visible alongside it for comparison.
+        rows = []
+        for crop_id in range(len(self.transformed_mid_points)):
+            filenames = self.cropped_filenames_by_crop.get(crop_id, [])
+            results = self.frame_results_by_crop.get(crop_id, [])
+            for file_name, result in zip(filenames, results):
+                seed_ids = result["seed_ids"]
+                raw_dict = result.get("raw_angle_dict", {})
+                raw_list = []
+                for sid in seed_ids:
+                    raw = raw_dict.get(sid, result["angle_dict"].get(sid, '-'))
+                    raw_list.append(round(raw) if isinstance(raw, (int, float)) and not np.isnan(raw) else '-')
+                rows.append([file_name, seed_ids, result["angle_list"], seed_ids, raw_list, result["state_list"]])
+
+        angle_df = pd.DataFrame(rows, columns=["filename", "seedling_id", "angles", "tot_numb", "raw_angles", "states"])
         angle_df.to_csv("img_angle_data.csv", index=False)
         self.img_angle_data = angle_df
 
@@ -817,6 +837,78 @@ class Gui():
         # seedling instead of assuming one global crop size.
         crop_size = (2 * box["half_w"] + 2 * box["half_h"]) / 2
         self.germination_detector.detect(crop_id, frame_contours, seed_point, crop_size)
+
+    def _reconstruct_series_for_crop(self, crop_id):
+        """Runs the angle-through-time temporal reconstruction (see
+        utils/angle_timeseries.py) for one seedling, over whatever frames
+        process_single_frame has produced so far in
+        self.frame_results_by_crop[crop_id]. Same idempotent,
+        callable-from-anywhere contract as _ensure_germination_detected
+        above -- safe to call on a partial preview now and a fuller
+        export/batch run later, since each call re-reconstructs from the
+        original per-frame geometric angle rather than an already-
+        reconstructed one (see the raw_angle_dict capture below).
+
+        Rewrites each frame's angle_dict/state_dict in place, so callers
+        holding a reference to the same result dicts (e.g. an open
+        SeedlingAnalysisWindow) see the update immediately. A frame whose
+        state is already "Manual" is a fixed anchor -- reconstruct_series
+        already leaves it untouched, so no special-casing is needed here
+        beyond feeding it in as such.
+
+        Convention: AngleCalculator.compute_biological_angle emits ~0 when
+        closed, growing as the hook opens, but the whole reconstruction +
+        the export's bio_angle column + the user's thresholds use the
+        opposite "bio" convention (180 = closed; see utils/angle_timeseries.py).
+        So each automated per-frame reading is converted to bio via
+        `180 - raw` before reconstruction. raw_angle_dict keeps the original
+        (pre-conversion, 0 = closed) geometric reading, which is what the
+        export's raw_angle column shows. Manual overrides are already stored
+        in bio (see SeedlingAnalysisWindow._place_manual_angle_point), so
+        they're fed through unchanged.
+        """
+        frame_results = self.frame_results_by_crop.get(crop_id)
+        if not frame_results:
+            return
+        seed_id = crop_id + 1
+
+        def _to_bio(v):
+            return 180.0 - v if isinstance(v, (int, float)) and not np.isnan(v) else None
+
+        bio_inputs = []
+        is_manual = []
+        for result in frame_results:
+            if result is None:
+                bio_inputs.append(None)
+                is_manual.append(False)
+                continue
+            manual = result.get("state_dict", {}).get(seed_id) == "Manual"
+            is_manual.append(manual)
+            if manual:
+                # Manual overrides are already in bio convention -- feed as-is.
+                bio_inputs.append(result["angle_dict"].get(seed_id))
+                continue
+            # Captured once per frame, on first reconstruction -- so a
+            # repeat call (partial preview, then a fuller export) always
+            # reconstructs from the same untouched geometric reading
+            # instead of re-smoothing an already-reconstructed value. A
+            # mask-edit recompute (process_single_frame with frame_index=)
+            # returns a fresh result dict with no raw_angle_dict yet, so its
+            # new geometric reading is correctly captured as the new raw
+            # baseline for that one frame.
+            raw_dict = result.setdefault("raw_angle_dict", {})
+            if seed_id not in raw_dict:
+                raw_dict[seed_id] = result["angle_dict"].get(seed_id)
+            bio_inputs.append(_to_bio(raw_dict[seed_id]))
+
+        angles_out, states_out = reconstruct_series(bio_inputs, is_manual=is_manual)
+
+        for result, angle, state, manual in zip(frame_results, angles_out, states_out, is_manual):
+            if result is None or manual:
+                continue
+            result["angle_dict"][seed_id] = angle
+            result.setdefault("state_dict", {})[seed_id] = state
+            sync_angle_and_state_lists(result)
 
     def _ensure_crop_points(self, crop_id):
         """Lazily computes crop_points_distributed[crop_id]/crop_points_numberID[crop_id]
@@ -1087,18 +1179,27 @@ class Gui():
         for crop_id in range(n_crops):
             self._ensure_germination_detected(crop_id)
 
+        self.progress_reporter.report(message="Reconstructing angle-through-time...", value=87)
+        for crop_id in range(n_crops):
+            self._reconstruct_series_for_crop(crop_id)
+
         self.progress_reporter.report(message="Building CSV...", value=90)
-        columns = ['img_name'] + list(range(1, n_crops + 1))
+        columns = ['img_name', 'seedling_id', 'raw_angle', 'state', 'bio_angle']
         rows = []
         for frame_idx, filename in enumerate(self.file_list):
-            row = {'img_name': filename}
             for crop_id in range(n_crops):
                 seed_id = crop_id + 1
                 frame_results = self.frame_results_by_crop.get(crop_id, [])
                 result = frame_results[frame_idx] if frame_idx < len(frame_results) else None
                 angle = result["angle_dict"].get(seed_id) if result else None
-                row[seed_id] = round(angle) if isinstance(angle, (int, float)) and not np.isnan(angle) else ''
-            rows.append(row)
+                raw = result.get("raw_angle_dict", {}).get(seed_id, angle) if result else None
+                rows.append({
+                    'img_name': filename,
+                    'seedling_id': seed_id,
+                    'raw_angle': round(raw) if isinstance(raw, (int, float)) and not np.isnan(raw) else '',
+                    'state': result.get("state_dict", {}).get(seed_id, '') if result else '',
+                    'bio_angle': round(angle) if isinstance(angle, (int, float)) and not np.isnan(angle) else '',
+                })
         export_df = pd.DataFrame(rows, columns=columns)
 
         self.progress_reporter.report(value=100, message="Export ready", export_df=export_df, export_done=True)

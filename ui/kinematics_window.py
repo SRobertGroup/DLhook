@@ -10,8 +10,6 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 STATE_COLORS = {
     "Closed": "tab:blue",
     "Opening": "tab:orange",
-    "Overhooked": "tab:red",
-    "Open": "tab:green",
     "Manual": "tab:purple",
 }
 UNKNOWN_STATE_COLOR = "0.5"
@@ -20,7 +18,8 @@ UNKNOWN_STATE_COLOR = "0.5"
 class KinematicsWindow(tk.Toplevel):
     """
     Phase 8: aggregate view of every seedling's angle over time, points
-    color-coded by bio_state (Open/Opening/Closed/Overhooked/Manual).
+    color-coded by the reconstructed bio_state (Closed/Opening/Manual, see
+    utils/angle_timeseries.py).
 
     Manual-refresh only (confirmed with user) -- reads directly from
     Gui.frame_results_by_crop/time_deltas/germination_detector on each

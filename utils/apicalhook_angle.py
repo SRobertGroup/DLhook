@@ -276,7 +276,7 @@ class AngleCalculator:
             B = p1[0] - p2[0]
             C = A * p1[0] + B * p1[1]
             return A, B, C
-        
+
         A1, B1, C1 = line(pt1, pt2)
         A2, B2, C2 = line(pt3, pt4)
         det = A1 * B2 - A2 * B1

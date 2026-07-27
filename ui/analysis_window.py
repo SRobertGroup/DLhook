@@ -9,6 +9,7 @@ import cv2
 from utils.gui_thread_safety import ProgressReporter
 from utils.mask_editor import MaskEditor
 from utils.postprocmask import resolve_mask_path
+from utils.angle_timeseries import sync_angle_and_state_lists
 from ui.zoomable_canvas import ZoomableImageCanvas
 
 # BGR colors, matching ApicalVisualizer's existing green-for-cotyledon convention.
@@ -20,7 +21,7 @@ HYPO_COLOR = (0, 128, 255)
 LABEL_BY_TARGET = {"cotyl": "1", "hypo": "2"}
 
 CANVAS_SIZE = 600
-DEFAULT_BRUSH_RADIUS = 20
+DEFAULT_BRUSH_RADIUS = 3
 
 
 class SeedlingAnalysisWindow(tk.Toplevel):
@@ -51,6 +52,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.brush_mode = "add"
         self.mask_editor = None
         self._painting = False
+        self._last_canvas_xy = None
 
         # Manual angle override (ported from the removed legacy review window):
         # a 3-click vector angle, with the same Overhook sign-flip convention,
@@ -83,6 +85,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.canvas.bind("<Button-1>", self._on_canvas_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind("<Motion>", lambda event: self._update_brush_preview_at(event.x, event.y))
+        self.canvas.bind("<Leave>", lambda event: self.canvas.clear_brush_preview())
         self.canvas.bind("<KeyPress-a>", lambda event: self._set_brush_mode("add"))
         self.canvas.bind("<KeyPress-A>", lambda event: self._set_brush_mode("add"))
         self.canvas.bind("<KeyPress-e>", lambda event: self._set_brush_mode("erase"))
@@ -175,16 +179,19 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             results.append(result)
             self.progress_reporter.report(value=int(((idx + 1) / total) * 100))
 
-        # Reconciles the Phase 8 "known gap": germination detection used to
-        # only ever run inside the full "Start Analysis" batch, so a
-        # preview-only seedling never got a germination time-zero at all.
-        self.gui._ensure_germination_detected(self.crop_id)
-
         # Store by reference (not a copy) in the Gui's shared per-crop results,
         # so later in-place edits here (Recompute angle / Replace angle / Blank
         # this frame) are visible to Export Results even after this window closes.
         self.gui.frame_results_by_crop[self.crop_id] = results
         self.gui.cropped_filenames_by_crop[self.crop_id] = cropped_filenames
+
+        # Reconciles the Phase 8 "known gap": germination detection used to
+        # only ever run inside the full "Start Analysis" batch, so a
+        # preview-only seedling never got a germination time-zero at all.
+        self.gui._ensure_germination_detected(self.crop_id)
+        # Same gap for the angle-timeseries reconstruction (Phase 9): a
+        # preview-only seedling never had the temporal pass applied either.
+        self.gui._reconstruct_series_for_crop(self.crop_id)
 
         self.progress_reporter.report(cropped_filenames=cropped_filenames, frame_results=results, done=True)
 
@@ -233,6 +240,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
     def _on_edit_target_change(self):
         self._load_mask_editor_for_current()
         self._render_current_frame()
+        if self._last_canvas_xy is not None:
+            self._update_brush_preview_at(*self._last_canvas_xy)
 
     def _get_brush_radius(self):
         try:
@@ -243,6 +252,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
     def _on_brush_radius_change(self, event=None):
         if self.mask_editor is not None:
             self.mask_editor.set_brush_radius(self._get_brush_radius())
+        if self._last_canvas_xy is not None:
+            self._update_brush_preview_at(*self._last_canvas_xy)
 
     def _load_mask_editor_for_current(self):
         """(Re)loads the brush-editable mask for the current frame + edit
@@ -286,6 +297,21 @@ class SeedlingAnalysisWindow(tk.Toplevel):
     def _set_brush_mode(self, mode):
         self.brush_mode = mode
         self.brush_mode_label.configure(text=f"Brush: {mode.upper()} (A=add, E=erase, Z=undo)")
+        if self._last_canvas_xy is not None:
+            self._update_brush_preview_at(*self._last_canvas_xy)
+
+    def _update_brush_preview_at(self, canvas_x, canvas_y):
+        """Moves/shows the brush-size preview circle under the cursor, in
+        the edit target's mask color -- hidden outside brush-editing (no
+        mask loaded, or mid manual-angle placement)."""
+        self._last_canvas_xy = (canvas_x, canvas_y)
+        if self.mask_editor is None or self._manual_mode:
+            self.canvas.clear_brush_preview()
+            return
+        img_x, img_y = self.canvas.canvas_to_image(canvas_x, canvas_y)
+        target_color = COTYL_COLOR if self.edit_target.get() == "cotyl" else HYPO_COLOR
+        outline = "#{:02x}{:02x}{:02x}".format(*target_color[::-1])  # BGR -> RGB hex
+        self.canvas.set_brush_preview(img_x, img_y, self._get_brush_radius(), outline=outline)
 
     def _on_canvas_press(self, event):
         self.canvas.focus_set()
@@ -299,6 +325,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self._paint_at(event.x, event.y)
 
     def _on_canvas_drag(self, event):
+        self._update_brush_preview_at(event.x, event.y)
         if not self._painting or self.mask_editor is None:
             return
         self._paint_at(event.x, event.y)
@@ -330,6 +357,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         file_name = self.cropped_filenames[self.current_frame]
         result = self.gui.process_single_frame(file_name, self.crop_id, frame_index=self.current_frame)
         self.frame_results[self.current_frame] = result
+        self.gui._reconstruct_series_for_crop(self.crop_id)
         self._render_current_frame()
 
     # --- Manual angle override (ported from the removed legacy window) ----
@@ -341,7 +369,9 @@ class SeedlingAnalysisWindow(tk.Toplevel):
     def _toggle_manual_angle_mode(self):
         self._manual_mode = not self._manual_mode
         self.place_angle_button.configure(bg="#d78a5e" if self._manual_mode else "white")
-        if not self._manual_mode:
+        if self._manual_mode:
+            self.canvas.clear_brush_preview()
+        else:
             self._reset_manual_angle()
             self._render_current_frame()
 
@@ -356,11 +386,16 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             ba, bc = a - b, c - b
             cosine_ang = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
             angle = round(np.degrees(np.arccos(np.clip(cosine_ang, -1.0, 1.0))))
+            # Store in the "bio" convention used everywhere downstream
+            # (180 = closed, decreasing as the hook opens, >180 = overhooked;
+            # see utils/angle_timeseries.py and Gui._reconstruct_series_for_crop).
+            # The clicked geometric angle is ~0 when the hook is closed, so a
+            # closed hook maps to ~180 via 180 - angle; an overhooked hook has
+            # folded PAST closed, so it reads just above 180 instead.
             if self.overhook_var.get():
-                # Same 0-360 (180=closed) convention as AngleCalculator's
-                # automated Overhooked branch (Phase 8) -- not a negation.
-                angle = 360 - angle
-            self._manual_angle_value = angle
+                self._manual_angle_value = 180 + angle
+            else:
+                self._manual_angle_value = 180 - angle
 
         self._render_current_frame()
 
@@ -368,13 +403,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         return self.gui.crop_points_numberID[self.crop_id][0]
 
     def _sync_angle_list(self, result):
-        seed_ids = result["seed_ids"]
-        angle_list = []
-        for sid in seed_ids:
-            a = result["angle_dict"].get(sid, '-')
-            angle_list.append(round(a) if isinstance(a, (int, float)) and not np.isnan(a) else '-')
-        result["angle_list"] = angle_list
-        result["state_list"] = [result.get("state_dict", {}).get(sid, '-') for sid in seed_ids]
+        sync_angle_and_state_lists(result)
 
     def _replace_angle(self):
         if not self.frame_results or self._manual_angle_value is None:
@@ -430,7 +459,12 @@ class SeedlingAnalysisWindow(tk.Toplevel):
 
         # No BGR->RGB conversion, matching the rest of the app's existing
         # (uncorrected) display convention -- consistent look, not a fix here.
-        blended = cv2.addWeighted(image, 1.0, overlay, 0.5, 0)
+        # Weights must sum to 1.0: where overlay == image (no mask), this
+        # reproduces the original pixel untouched (background "transparent");
+        # only true mask pixels (overlay != image) get the 50/50 tint. Weights
+        # summing to >1 (the old 1.0/0.5 split) blew out every background
+        # pixel, making it look like the crop sat "under" solid mask colors.
+        blended = cv2.addWeighted(image, 0.5, overlay, 0.5, 0)
 
         # Manual angle placement markers are burned into the image itself
         # (rather than drawn as separate Tk canvas items) since

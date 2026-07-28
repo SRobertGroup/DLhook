@@ -1,6 +1,13 @@
 import os
 
-# Cleans specific folders on exit from the seedling GUI
+# Cleans specific folders on exit from the seedling GUI.
+#
+# Masks now live in an in-memory MaskStore (utils/mask_store.py) instead of
+# being round-tripped through data/predict/ + data/postprocess/, so those two
+# directories are normally empty -- they are still listed here because the
+# opt-in DLHOOK_DUMP_MASKS dump writes into data/predict/, and because this
+# class is also what CREATES all four directories (see the makedirs below,
+# which other code depends on for data/images/).
 class RemoveData:
     def __init__(self):
         self.paths = [

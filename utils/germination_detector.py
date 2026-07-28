@@ -3,12 +3,13 @@ import numpy as np
 
 
 def _area_near_point(contours, point, proximity_radius):
-    """Total area of contours whose centroid falls within proximity_radius of point."""
+    """Total area of contours whose centroid falls within proximity_radius of
+    point. No minimum vertex count: that floor exists in the angle path only
+    because cv2.fitEllipse needs 5 points, and applying it here discarded small
+    but real emerging-radicle blobs."""
     px, py = point
     total_area = 0.0
     for contour in contours:
-        if len(contour) < 5:
-            continue
         area = cv2.contourArea(contour)
         if area <= 0:
             continue
@@ -50,6 +51,10 @@ class GerminationDetector:
 
         self.germination_frame = {}
         self._overrides = {}
+        # Per-seedling record of what detect() actually measured, so a wrong
+        # time-zero can be diagnosed (and the thresholds above calibrated)
+        # from real numbers instead of guesswork. See describe().
+        self.diagnostics = {}
 
     def detect(self, seedling_id, germ_contours_by_frame, seed_point, crop_size):
         """
@@ -77,11 +82,38 @@ class GerminationDetector:
                 break
 
         self.germination_frame[seedling_id] = frame_idx
+        self.diagnostics[seedling_id] = {
+            "proximity_radius": proximity_radius,
+            "area_threshold": area_threshold,
+            "areas": areas,
+            "frame": frame_idx,
+        }
         return frame_idx
+
+    def describe(self, seedling_id):
+        """One-line summary of the last detect() call for this seedling: the
+        thresholds it used and the per-frame near-seed areas it compared against
+        them. The only way to tell "the germ mask is empty" (all areas 0) apart
+        from "the threshold is too high" (areas nonzero but below it)."""
+        diag = self.diagnostics.get(seedling_id)
+        if diag is None:
+            return f"seedling {seedling_id}: never detected"
+        areas = ", ".join(f"{a:.0f}" for a in diag["areas"])
+        return (f"seedling {seedling_id}: frame={diag['frame']} "
+                f"radius={diag['proximity_radius']:.1f} "
+                f"threshold={diag['area_threshold']:.0f} areas=[{areas}]")
 
     def set_override(self, seedling_id, frame_idx):
         """Manual user override of a detected (or missing) time-zero frame."""
         self._overrides[seedling_id] = frame_idx
+
+    def clear_override(self, seedling_id):
+        """Drop a manual override, falling back to whatever detect() found."""
+        self._overrides.pop(seedling_id, None)
+
+    def has_override(self, seedling_id):
+        """True if this seedling's time-zero was set by the user rather than detected."""
+        return seedling_id in self._overrides
 
     def get_time_zero(self, seedling_id):
         """User override if set, else the detected frame index (or None)."""

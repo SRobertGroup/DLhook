@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 STATE_COLORS = {
@@ -13,6 +14,15 @@ STATE_COLORS = {
     "Manual": "tab:purple",
 }
 UNKNOWN_STATE_COLOR = "0.5"
+UNKNOWN_STATE_LABEL = "Unclassified"
+
+# Line color per seedling, so a seedling stays identifiable even where its
+# points all share one state color. Deliberately disjoint from STATE_COLORS'
+# blue/orange/purple, which mean something different on the same axes.
+SEEDLING_LINE_COLORS = [
+    "tab:green", "tab:red", "tab:brown", "tab:pink",
+    "tab:olive", "tab:cyan", "tab:gray", "black",
+]
 
 
 class KinematicsWindow(tk.Toplevel):
@@ -27,11 +37,14 @@ class KinematicsWindow(tk.Toplevel):
     (Start Analysis, Preview seedling, or Export results all populate the
     same shared store), with no live-updating plumbing required.
 
-    Each seedling's x-axis is zeroed at its own detected germination frame
-    (Phase 4's GerminationDetector). A seedling with no detected germination
-    yet is plotted on raw elapsed time instead, drawn dashed and labeled
+    Each seedling's x-axis is zeroed at its own germination frame -- either
+    detected by GerminationDetector or set by hand in SeedlingAnalysisWindow,
+    which takes precedence. A seedling with no germination frame at all is
+    plotted on raw elapsed time instead, drawn dashed and labeled
     "(ungerminated)" so it's visually distinct rather than silently
     misleading (confirmed with user).
+
+    Points are colored by state and lines by seedling; see the two legends.
     """
 
     def __init__(self, gui):
@@ -59,11 +72,21 @@ class KinematicsWindow(tk.Toplevel):
                  for d in self.gui.time_deltas],
                 dtype=float,
             )
-        else:
+            # All-NaN happens when the images carried no usable timestamps and
+            # the user cancelled the fallback-interval prompt. Without this the
+            # window silently reported "No results yet" for a fully analysed run,
+            # since every point was dropped for having a NaN x.
+            if not np.any(np.isfinite(x_axis_all)):
+                use_time_deltas = False
+        if not use_time_deltas:
             x_axis_all = np.arange(n_frames, dtype=float)
 
         detector = self.gui.germination_detector
         any_plotted = False
+        # Which encodings actually occur, so each legend lists only what's on
+        # screen rather than every state the reconstruction can produce.
+        states_seen = []
+        seedling_handles = []
 
         for crop_id, frame_results in sorted(self.gui.frame_results_by_crop.items()):
             seed_id = crop_id + 1
@@ -86,6 +109,9 @@ class KinematicsWindow(tk.Toplevel):
                 ys.append(angle)
                 state = result.get("state_dict", {}).get(seed_id)
                 colors.append(STATE_COLORS.get(state, UNKNOWN_STATE_COLOR))
+                state_label = state if state in STATE_COLORS else UNKNOWN_STATE_LABEL
+                if state_label not in states_seen:
+                    states_seen.append(state_label)
 
             if not xs:
                 continue
@@ -96,9 +122,12 @@ class KinematicsWindow(tk.Toplevel):
             colors_sorted = [colors[i] for i in order]
 
             style = "--" if unaligned else "-"
+            line_color = SEEDLING_LINE_COLORS[crop_id % len(SEEDLING_LINE_COLORS)]
             label = f"Seedling {seed_id}" + (" (ungerminated)" if unaligned else "")
-            self.ax.plot(xs_sorted, ys_sorted, style, color="0.7", linewidth=1, zorder=1, label=label)
+            self.ax.plot(xs_sorted, ys_sorted, style, color=line_color, linewidth=1, zorder=1)
             self.ax.scatter(xs_sorted, ys_sorted, c=colors_sorted, zorder=2, s=18)
+            seedling_handles.append(Line2D([], [], linestyle=style, color=line_color,
+                                            linewidth=1, label=label))
 
         if not any_plotted:
             self.ax.text(0.5, 0.5, "No results yet -- run Start Analysis or preview a seedling",
@@ -108,6 +137,21 @@ class KinematicsWindow(tk.Toplevel):
             self.ax.set_xlabel(x_label)
             self.ax.set_ylabel("Angle (deg)")
             self.ax.axhline(180, color="0.85", linewidth=1, zorder=0)
-            self.ax.legend(fontsize=8, loc="best")
+
+            # Two legends, because the plot carries two independent encodings:
+            # marker color = per-point state, line color = which seedling. The
+            # single legend this used to draw labelled only the (then uniformly
+            # grey) lines, so nothing on screen explained the point colors.
+            state_handles = [
+                Line2D([], [], marker="o", linestyle="none",
+                       color=STATE_COLORS.get(s, UNKNOWN_STATE_COLOR), label=s)
+                for s in states_seen
+            ]
+            if state_handles:
+                self.ax.add_artist(self.ax.legend(handles=state_handles, title="State",
+                                                   fontsize=8, title_fontsize=8, loc="upper right"))
+            if seedling_handles:
+                self.ax.legend(handles=seedling_handles, title="Seedling",
+                                fontsize=8, title_fontsize=8, loc="lower left")
 
         self.canvas.draw_idle()

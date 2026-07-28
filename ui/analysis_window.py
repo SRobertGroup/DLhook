@@ -8,20 +8,27 @@ import cv2
 
 from utils.gui_thread_safety import ProgressReporter
 from utils.mask_editor import MaskEditor
-from utils.postprocmask import resolve_mask_path
 from utils.angle_timeseries import sync_angle_and_state_lists
+from utils.germination_detector import GerminationDetector
 from ui.zoomable_canvas import ZoomableImageCanvas
 
 # BGR colors, matching ApicalVisualizer's existing green-for-cotyledon convention.
 COTYL_COLOR = (0, 255, 0)
 HYPO_COLOR = (0, 128, 255)
+GERM_COLOR = (255, 0, 255)
 
-# Germ is intentionally not shown/editable here (confirmed with user) -- it's
-# still segmented and used by GerminationDetector, just not exposed in this UI.
+# Germ is viewable but not brush-editable: it feeds GerminationDetector rather
+# than the angle geometry, and being able to SEE it is what makes a wrong
+# germination time-zero diagnosable (an empty or whole-crop germ mask is obvious
+# on screen and invisible in the numbers).
 LABEL_BY_TARGET = {"cotyl": "1", "hypo": "2"}
 
 CANVAS_SIZE = 600
 DEFAULT_BRUSH_RADIUS = 3
+
+# Manual angle markers, drawn as canvas vector items -- RGB hex for Tk, the same
+# purple the burned-in cv2 markers showed on screen.
+ANGLE_MARKER_COLOR = "#877cb8"
 
 
 class SeedlingAnalysisWindow(tk.Toplevel):
@@ -47,6 +54,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
 
         self.show_cotyl = tk.BooleanVar(value=True)
         self.show_hypo = tk.BooleanVar(value=True)
+        self.show_germ = tk.BooleanVar(value=False)
         self.edit_target = tk.StringVar(value="cotyl")
         self.brush_radius_var = tk.StringVar(value=str(DEFAULT_BRUSH_RADIUS))
         self.brush_mode = "add"
@@ -117,6 +125,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
                         command=self._render_current_frame).pack(side=tk.LEFT)
         tk.Checkbutton(overlay_frame, text="Hypocotyl", variable=self.show_hypo,
                         command=self._render_current_frame).pack(side=tk.LEFT)
+        tk.Checkbutton(overlay_frame, text="Germination", variable=self.show_germ,
+                        command=self._render_current_frame).pack(side=tk.LEFT)
 
         nav_frame = tk.Frame(self)
         nav_frame.grid(row=3, column=0, columnspan=4, pady=8)
@@ -160,6 +170,21 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.blank_angle_button = tk.Button(manual_frame, text="Blank this frame", width=14,
                                              command=self._blank_angle)
         self.blank_angle_button.pack(side=tk.LEFT, padx=(4, 0))
+
+        germ_frame = tk.Frame(self)
+        germ_frame.grid(row=7, column=0, columnspan=4, pady=(0, 8))
+        tk.Label(germ_frame, text="Germination:").pack(side=tk.LEFT)
+        self.set_germ_button = tk.Button(germ_frame, text="Set to this frame", width=16,
+                                         command=self._set_germination_frame, state=tk.DISABLED)
+        self.set_germ_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.germ_all_button = tk.Button(germ_frame, text="Apply to all seedlings", width=20,
+                                        command=self._apply_germination_to_all, state=tk.DISABLED)
+        self.germ_all_button.pack(side=tk.LEFT, padx=(4, 0))
+        self.clear_germ_button = tk.Button(germ_frame, text="Clear", width=6,
+                                          command=self._clear_germination_frame, state=tk.DISABLED)
+        self.clear_germ_button.pack(side=tk.LEFT, padx=(4, 0))
+        self.germ_label = tk.Label(germ_frame, text="")
+        self.germ_label.pack(side=tk.LEFT, padx=(8, 0))
 
     # --- Segmentation (background thread) -----------------------------
 
@@ -218,6 +243,10 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         has_frames = len(self.frame_results) > 0
         self.prev_button["state"] = tk.NORMAL if has_frames and self.current_frame > 0 else tk.DISABLED
         self.next_button["state"] = tk.NORMAL if has_frames and self.current_frame < len(self.frame_results) - 1 else tk.DISABLED
+        germ_state = tk.NORMAL if has_frames else tk.DISABLED
+        self.set_germ_button["state"] = germ_state
+        self.germ_all_button["state"] = germ_state
+        self.clear_germ_button["state"] = germ_state
 
     def _show_previous_frame(self):
         if self.current_frame > 0:
@@ -257,7 +286,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
 
     def _load_mask_editor_for_current(self):
         """(Re)loads the brush-editable mask for the current frame + edit
-        target from disk (the postprocessed version if one already exists,
+        target from the shared MaskStore (a previous brush edit if one exists,
         else the raw prediction) -- called whenever the frame or the edit
         target changes, never mid-stroke."""
         if not self.cropped_filenames:
@@ -266,20 +295,19 @@ class SeedlingAnalysisWindow(tk.Toplevel):
 
         file_name = self.cropped_filenames[self.current_frame]
         label = LABEL_BY_TARGET[self.edit_target.get()]
-        path = resolve_mask_path(file_name, label)
-        raw = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        if raw is None:
+        mask = self.gui.mask_store.get(file_name, label)
+        if mask is None:
             self.mask_editor = None
             return
 
-        _, binary = cv2.threshold(raw, 127, 255, cv2.THRESH_BINARY)
-        # UNetInference saves masks with 0 = foreground, 255 = background
-        # (same convention process_single_frame un-inverts via bitwise_not
-        # before building cotyl_mask/hypo_mask) -- invert here too so
-        # MaskEditor's internal representation is 255 = foreground,
-        # matching what _render_current_frame expects from result["cotyl_mask"]
-        # /result["hypo_mask"] and what "Add"/"Erase" mean to the user.
-        binary = cv2.bitwise_not(binary)
+        # The store already holds masks as 255 = foreground -- the same
+        # convention MaskEditor works in and _render_current_frame expects from
+        # result["cotyl_mask"]/["hypo_mask"] -- so no inversion is needed here.
+        # (The old code had to bitwise_not every mask it read, because the
+        # on-disk format was inverted; getting that wrong was the cause of the
+        # "overlay looks inverted" bug.) Copy so edits don't mutate the stored
+        # raw prediction in place before the user commits a stroke.
+        _, binary = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
         self.mask_editor = MaskEditor(binary, brush_radius=self._get_brush_radius())
 
     def _persist_edited_mask(self):
@@ -287,12 +315,11 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             return
         file_name = self.cropped_filenames[self.current_frame]
         label = LABEL_BY_TARGET[self.edit_target.get()]
-        os.makedirs("data/postprocess", exist_ok=True)
-        out_path = os.path.join("data/postprocess", f"{file_name[:-4]}-{label}.png")
-        # Invert back to the on-disk 0 = foreground convention before saving,
-        # so this file stays interchangeable with a raw data/predict/ file
-        # for every other reader (resolve_mask_path/process_single_frame).
-        cv2.imwrite(out_path, cv2.bitwise_not(self.mask_editor.get_mask()))
+        # A dict assignment into the session-wide store on Gui, replacing the
+        # full PNG encode+write this used to do on every mouse-up. Kept on Gui
+        # (not this Toplevel) so the edit survives closing/reopening the window,
+        # which is what the data/postprocess/ file used to provide.
+        self.gui.mask_store.put_edited(file_name, label, self.mask_editor.get_mask().copy())
 
     def _set_brush_mode(self, mode):
         self.brush_mode = mode
@@ -365,6 +392,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
     def _reset_manual_angle(self):
         self._manual_angle_points = []
         self._manual_angle_value = None
+        self.canvas.clear_angle_markers()
 
     def _toggle_manual_angle_mode(self):
         self._manual_mode = not self._manual_mode
@@ -385,7 +413,11 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             a, b, c = (np.array(p) for p in self._manual_angle_points)
             ba, bc = a - b, c - b
             cosine_ang = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-            angle = round(np.degrees(np.arccos(np.clip(cosine_ang, -1.0, 1.0))))
+            # Kept as a float: the clicked points are float image coordinates
+            # (canvas_to_image doesn't quantize), so rounding to whole degrees
+            # here would throw away the precision zooming in is meant to buy.
+            # Rounded only for display, like every other angle in this window.
+            angle = float(np.degrees(np.arccos(np.clip(cosine_ang, -1.0, 1.0))))
             # Store in the "bio" convention used everywhere downstream
             # (180 = closed, decreasing as the hook opens, >180 = overhooked;
             # see utils/angle_timeseries.py and Gui._reconstruct_series_for_crop).
@@ -430,6 +462,49 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self._sync_angle_list(result)
         self._render_current_frame()
 
+    # --- Germination time-zero -------------------------------------------
+
+    def _germination_detector(self):
+        """The Gui's shared GerminationDetector, created on demand -- the same
+        lazy init Gui._ensure_germination_detected does, so setting a
+        germination frame works even for a seedling whose automatic detection
+        hasn't run yet."""
+        if self.gui.germination_detector is None:
+            self.gui.germination_detector = GerminationDetector()
+        return self.gui.germination_detector
+
+    def _set_germination_frame(self):
+        if not self.frame_results:
+            return
+        self._germination_detector().set_override(self.crop_id, self.current_frame)
+        self._update_germination_label()
+
+    def _apply_germination_to_all(self):
+        """Same germination frame for every seedling on the plate -- the usual
+        case, since one plate is imaged as one time series."""
+        if not self.frame_results:
+            return
+        detector = self._germination_detector()
+        for crop_id in range(len(self.gui.crop_boxes)):
+            detector.set_override(crop_id, self.current_frame)
+        self._update_germination_label()
+
+    def _clear_germination_frame(self):
+        """Drop the manual override, falling back to automatic detection."""
+        self._germination_detector().clear_override(self.crop_id)
+        self._update_germination_label()
+
+    def _update_germination_label(self):
+        detector = self.gui.germination_detector
+        time_zero = detector.get_time_zero(self.crop_id) if detector is not None else None
+        if time_zero is None:
+            self.germ_label.configure(text="not set")
+            return
+        # Distinguishing manual from detected matters: it's the difference
+        # between "the model found this" and "I told it this".
+        source = "manual" if detector.has_override(self.crop_id) else "detected"
+        self.germ_label.configure(text=f"{source}: frame {time_zero + 1}")
+
     # --- Rendering --------------------------------------------------------
 
     def _render_current_frame(self):
@@ -439,6 +514,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         file_name = self.cropped_filenames[self.current_frame]
         result = self.frame_results[self.current_frame]
         self.frame_label.configure(text=f"{file_name} ({self.current_frame + 1}/{len(self.frame_results)})")
+        self._update_germination_label()
 
         if result is None:
             self.angle_label.configure(text="No mask/segmentation data for this frame.")
@@ -456,6 +532,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             mask = self.mask_editor.get_mask() if (self.mask_editor is not None and target == "hypo") else result["hypo_mask"]
             if mask is not None:
                 overlay[mask > 0] = HYPO_COLOR
+        if self.show_germ.get() and result.get("germ_mask") is not None:
+            overlay[result["germ_mask"] > 0] = GERM_COLOR
 
         # No BGR->RGB conversion, matching the rest of the app's existing
         # (uncorrected) display convention -- consistent look, not a fix here.
@@ -466,16 +544,11 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         # pixel, making it look like the crop sat "under" solid mask colors.
         blended = cv2.addWeighted(image, 0.5, overlay, 0.5, 0)
 
-        # Manual angle placement markers are burned into the image itself
-        # (rather than drawn as separate Tk canvas items) since
-        # ZoomableImageCanvas fully redraws from the image on every zoom/pan.
-        marker_color = (135, 124, 184)
-        for px, py in self._manual_angle_points:
-            cv2.circle(blended, (int(round(px)), int(round(py))), 4, marker_color, -1)
-        for (x0, y0), (x1, y1) in zip(self._manual_angle_points, self._manual_angle_points[1:]):
-            cv2.line(blended, (int(round(x0)), int(round(y0))), (int(round(x1)), int(round(y1))), marker_color, 2)
-
         self.canvas.set_image(blended)
+        # Markers go on as canvas vector items, at a fixed screen size, keeping
+        # them crisp at any zoom (they used to be burned into the crop at native
+        # resolution and then magnified along with it).
+        self.canvas.set_angle_markers(self._manual_angle_points, ANGLE_MARKER_COLOR)
 
         angle_dict = result["angle_dict"]
         if angle_dict:
@@ -486,5 +559,5 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         else:
             angle_text = "no angle computed for this frame"
         if self._manual_angle_value is not None:
-            angle_text += f"  |  manual: {self._manual_angle_value}° (Replace angle to commit)"
+            angle_text += f"  |  manual: {self._manual_angle_value:.1f}° (Replace angle to commit)"
         self.angle_label.configure(text=angle_text)

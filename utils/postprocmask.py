@@ -3,20 +3,6 @@ import numpy as np
 import cv2
 
 
-def resolve_mask_path(file_name, label, predict_dir="data/predict", postprocess_dir="data/postprocess"):
-    """
-    Path to use when loading a cropped frame's mask for a given label: the
-    brush-edited version in data/postprocess/ if one exists (Phase 7), else
-    the raw UNetInference prediction in data/predict/. Callers downstream
-    (process_single_frame's threshold/erode/dilate/contour steps) don't need
-    to know which one they got.
-    """
-    base = f"{file_name[:-4]}-{label}.png"
-    postprocess_path = os.path.join(postprocess_dir, base)
-    if os.path.exists(postprocess_path):
-        return postprocess_path
-    return os.path.join(predict_dir, base)
-
 """
 This class takes lists of tuples as input containing the seedling starting points (x,y) and returns a
 a list contating in the same structure as the input which gives each point a specific nunber/id

@@ -6,6 +6,11 @@ from PIL import Image, ImageTk
 MAX_ZOOM_MULTIPLIER = 8
 ZOOM_STEP = 1.2
 
+# Manual angle markers are drawn at a fixed size in SCREEN pixels, so they stay
+# the same crisp dot/line at every zoom level instead of growing with the image.
+ANGLE_MARKER_RADIUS_PX = 3
+ANGLE_MARKER_WIDTH_PX = 2
+
 
 class ZoomableImageCanvas(tk.Canvas):
     """
@@ -38,6 +43,11 @@ class ZoomableImageCanvas(tk.Canvas):
         # _redraw() does delete("all") on every zoom/frame change and must
         # re-draw it after the image to keep it on top.
         self._brush_preview = None
+
+        # Manual angle markers, same idea: image-space points + a color, drawn
+        # as canvas items rather than burned into the image, so they don't get
+        # magnified into blobs by the zoom upscale.
+        self._angle_markers = ([], None)
 
         self.bind("<MouseWheel>", self._on_mousewheel)  # Windows/macOS
         self.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, ZOOM_STEP))  # Linux scroll up
@@ -100,6 +110,37 @@ class ZoomableImageCanvas(tk.Canvas):
         r = max(1.0, img_radius * self.zoom)
         self.create_oval(cx - r, cy - r, cx + r, cy + r,
                           outline=outline, width=2, tags="brush_preview")
+
+    def set_angle_markers(self, points, color):
+        """Shows the manual-angle placement markers: dots at each image-space
+        (x, y) in `points`, joined in order. Drawing these as canvas items
+        instead of cv2.circle/cv2.line on the image itself is what keeps them
+        crisp -- a 4 px dot burned into a crop shown at 10x zoom became a 40 px
+        hard-edged blob, and a click could only be placed on a visible 10 px
+        grid."""
+        self._angle_markers = (list(points), color)
+        self._draw_angle_markers()
+
+    def clear_angle_markers(self):
+        self._angle_markers = ([], None)
+        self.delete("angle_markers")
+
+    def _draw_angle_markers(self):
+        self.delete("angle_markers")
+        points, color = self._angle_markers
+        if not points or self._image is None:
+            return
+
+        x1, y1, _, _ = self._visible_bounds()
+        canvas_points = [((px - x1) * self.zoom, (py - y1) * self.zoom) for px, py in points]
+
+        for (cx0, cy0), (cx1, cy1) in zip(canvas_points, canvas_points[1:]):
+            self.create_line(cx0, cy0, cx1, cy1, fill=color,
+                              width=ANGLE_MARKER_WIDTH_PX, tags="angle_markers")
+        r = ANGLE_MARKER_RADIUS_PX
+        for cx, cy in canvas_points:
+            self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color,
+                              outline=color, tags="angle_markers")
 
     def canvas_to_image(self, canvas_x, canvas_y):
         """Maps a canvas pixel coordinate to the image pixel coordinate
@@ -171,7 +212,12 @@ class ZoomableImageCanvas(tk.Canvas):
         # being stretched back out to fill the square canvas.
         out_w = max(1, int(round(crop.shape[1] * self.zoom)))
         out_h = max(1, int(round(crop.shape[0] * self.zoom)))
-        resized = cv2.resize(crop, (out_w, out_h))
+        # Explicit interpolation: the default INTER_LINEAR is a 2x2 tap filter,
+        # visibly blocky on the large upscales this canvas always does (a
+        # ~100 px seedling crop fitted to 600 px is already ~6x before the user
+        # zooms at all).
+        interpolation = cv2.INTER_LANCZOS4 if self.zoom > 1 else cv2.INTER_AREA
+        resized = cv2.resize(crop, (out_w, out_h), interpolation=interpolation)
         offset_x = (ix1 - x1) * self.zoom
         offset_y = (iy1 - y1) * self.zoom
 
@@ -181,3 +227,4 @@ class ZoomableImageCanvas(tk.Canvas):
         self.delete("all")
         self.create_image(offset_x, offset_y, image=self._photo, anchor=tk.NW)
         self._draw_brush_preview()
+        self._draw_angle_markers()

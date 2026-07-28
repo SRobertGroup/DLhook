@@ -17,7 +17,8 @@ from utils.angle_timeseries import reconstruct_series, sync_angle_and_state_list
 from utils.clean_on_exit import *
 from utils.matching_crop2points_GUI import *
 from utils.preprocess_model_input import *
-from utils.postprocmask import PostprocessMasks, point_num, resolve_mask_path
+from utils.postprocmask import PostprocessMasks, point_num
+from utils.mask_store import MaskStore
 from utils.gui_thread_safety import ProgressReporter
 from utils.germination_detector import GerminationDetector
 from ui.analysis_window import SeedlingAnalysisWindow
@@ -26,8 +27,6 @@ from ui.kinematics_window import KinematicsWindow
 from datetime import datetime
 import threading
 import json
-
-import re
 
 import ast
 from PIL import Image, ImageTk
@@ -98,6 +97,13 @@ class Gui():
         self.fallback_interval_minutes=None
         self.time_deltas=[]
 
+        # Selected image folder, its frames in acquisition order, and each
+        # frame's capture time (filename -> datetime or None), read once at
+        # import by order_series and reused by _collect_image_metadata.
+        self.path=None
+        self.file_list=[]
+        self.capture_times={}
+
         # Per-seedling adjustable crop boxes (image coords), 1:1 with seedling_pairs,
         # auto-derived from each pair's bounding box: {"cx","cy","half_w","half_h"}
         self.crop_boxes=[]
@@ -129,6 +135,15 @@ class Gui():
         # preview window being closed, and are visible to "Export results".
         self.frame_results_by_crop={}
         self.cropped_filenames_by_crop={}
+
+        # In-memory segmentation masks, replacing the data/predict/ +
+        # data/postprocess/ PNG round-trip. Lives on Gui (not on a preview
+        # Toplevel) so brush edits survive a window being closed and reopened,
+        # exactly as the on-disk files used to. Set DLHOOK_DUMP_MASKS=1 to also
+        # write masks out to data/predict/ at the end of a run for validation
+        # against previously exported ground-truth masks.
+        self.mask_store = MaskStore()
+        self.dump_masks = os.environ.get("DLHOOK_DUMP_MASKS", "").strip() not in ("", "0", "false", "False")
 
         #The following variables are used to controll the buttons,
         self.check_place_rect=False
@@ -276,55 +291,12 @@ class Gui():
         self.root.after(100, self._pump_progress)
 
 
-    def start_sort(self):
-        """Record the start index based on selection length."""
-        try:
-            self.str1 = len(self.sort_txt_box.selection_get())
-            print(f"[DEBUG] Start string length (str1): {self.str1}")
-        except tk.TclError:
-            self.str1 = 0
-            print("[DEBUG] No selection made for start string.")
-
-    def end_sort(self):
-        """Sort files by number extracted from filename."""
-        print("[DEBUG] Starting end_sort...")
-
-        sorted_filenames = []
-        for file in self.file_list:
-            try:
-                # Remove file extension
-                base_name = os.path.splitext(file)[0]
-                # Extract number from entire base name
-                number_match = re.search(r'\d+', base_name)
-                if number_match:
-                    sort_key = int(number_match.group())
-                    sorted_filenames.append((sort_key, file))
-                else:
-                    print(f"[DEBUG] No number found in: {file}")
-            except Exception as e:
-                print(f"[DEBUG] Error processing {file}: {e}")
-
-        sorted_filenames.sort(key=lambda x: x[0])
-        sorted_filenames_output = [file[1] for file in sorted_filenames]
-
-        print("[DEBUG] Sorted filenames:")
-        for f in sorted_filenames_output:
-            print(f)
-
-        self.add_files(sorted_filenames_output)
-        tk.messagebox.showinfo("Sorting Complete", "Image files have been successfully sorted.")
-
-    def imagename_in_sort_section(self):
-        """Populate text box with the selected filename to extract sorting substring."""
-        # self.sort_start_b["state"] = tk.NORMAL
-        # self.sort_end_b["state"] = tk.NORMAL
-
-        clicked_file = self.listbox.curselection()
-        for item in clicked_file:
-            self.selected_image = self.listbox.get(item)
-            self.sort_txt_box.delete("1.0", tk.END)  # Ensure clean state
-            self.sort_txt_box.insert(tk.INSERT, self.selected_image)
-            print(f"[DEBUG] Selected image for sorting reference: {self.selected_image}")
+    # The old manual "sort by a substring of the filename" section
+    # (start_sort/end_sort/imagename_in_sort_section) is gone: its widgets were
+    # already commented out and its self.sort_txt_box never created, so all three
+    # methods would have raised AttributeError if anything had called them. The
+    # ordering they were meant to provide is now done automatically from each
+    # frame's capture time in order_series().
 
     def canvas_circle_activate(self):
 
@@ -572,13 +544,17 @@ class Gui():
         th.start()
 
     def _collect_image_metadata(self):
-        self.metadata_list = []
-        for image in self.file_list:
-            img_path = os.path.join(self.path, image)
-            creation_time = get_image_creation_time(img_path)
-            self.metadata_list.append({"filename": image, "creation_time": creation_time})
+        # Capture times were already read (and used to order file_list) at import
+        # time in add_files, so this reuses them instead of re-decoding every
+        # file's headers a second time.
+        self.metadata_list = [
+            {"filename": image, "creation_time": self.capture_times.get(image)}
+            for image in self.file_list
+        ]
 
         if metadata_has_gaps(self.metadata_list):
+            # None here means the user cancelled the dialog; the kinematics
+            # window then falls back to plotting against the frame index.
             self.fallback_interval_minutes = simpledialog.askfloat(
                 "Missing timestamp metadata",
                 "Some images are missing reliable creation-time metadata.\n"
@@ -704,21 +680,23 @@ class Gui():
 
 
     def run_apical_pipeline(self):
-        # Predict masks with Pytorch CNN from RootPainter
-        cotyledon_predictor = UNetInference(model_path="weights/RootPainter_weights/cotyledon_v5.pkl")
-        cotyledon_predictor3 = UNetInference(model_path="weights/RootPainter_weights/cotyledon_v3.pkl")
-        hypocot_predictor = UNetInference(model_path="weights/RootPainter_weights/hypocot_v5.pkl")
-        germ_predictor = UNetInference(model_path="weights/RootPainter_weights/germ_v1.pkl")
-
-        cotyledon_predictor.predict_folder(image_dir="data/images/", output_dir="data/predict/", label="1")
-        cotyledon_predictor3.predict_folder(image_dir="data/images/", output_dir="data/predict/", label="3")
-        hypocot_predictor.predict_folder(image_dir="data/images/", output_dir="data/predict/", label="2")
-        germ_predictor.predict_folder(image_dir="data/images/", output_dir="data/predict/", label="4")
+        # Predict masks with Pytorch CNN from RootPainter. Models are fetched
+        # from the process-wide cache (get_predictor) so each weight file loads
+        # from disk once and is shared with the per-seedling preview path.
+        # cotyledon_v3 (label "3") is deliberately not run: process_single_frame
+        # only ever reads labels 1/2/4, so segmenting it was pure wasted compute.
+        predictors = [
+            ("1", get_predictor("weights/RootPainter_weights/cotyledon_v5.pkl")),
+            ("2", get_predictor("weights/RootPainter_weights/hypocot_v5.pkl")),
+            ("4", get_predictor("weights/RootPainter_weights/germ_v1.pkl")),
+        ]
 
         image_crops_angles = {}
         image_crops_angles_max = {}
 
-        # Construct filenames
+        # Construct filenames. This explicit list -- not os.listdir(data/images/)
+        # -- is the work list handed to inference, so a leftover crop from an
+        # earlier "Preview seedling" run can't be silently re-segmented here.
         self.cropped_sorted_filenames = [
             f"{crop_n}-crop-{filename[:-4]}.png"
             for crop_n in range(len(self.transformed_mid_points))
@@ -730,39 +708,69 @@ class Gui():
 
         self.reset_frame_accumulators()
 
-        for idx, file_name in enumerate(self.cropped_sorted_filenames):
-            self.progress_reporter.report(value=30 + int((idx / total_files) * 70))
-            print(file_name)
+        # Inference and per-frame processing are INTERLEAVED in chunks rather
+        # than run as three whole-dataset passes followed by a frame loop. All
+        # three models stay resident (get_predictor caches them), so alternating
+        # between them per chunk costs no reloads -- and it means only one
+        # chunk's worth of raw masks is ever held at once, instead of every
+        # mask for the whole run.
+        for start in range(0, total_files, IMAGE_CHUNK):
+            chunk = self.cropped_sorted_filenames[start:start + IMAGE_CHUNK]
+            chunk_paths = [os.path.join("data/images", f) for f in chunk]
 
-            # Filenames are "{crop_id}-crop-{original_name}.png" (see
-            # cropped_sorted_filenames above) -- split on the first "-"
-            # rather than indexing the first character, which silently
-            # broke for crop_id >= 10.
-            crop_id = int(file_name.split("-", 1)[0])
-            result = self.process_single_frame(file_name, crop_id)
-            if result is None:
-                continue
+            for label, predictor in predictors:
+                self.mask_store.put_raw_bulk(predictor.predict_files(chunk_paths, label=label), label)
 
-            hook = result["hook"]
-            seed_ids = result["seed_ids"]
-            angle_dict = result["angle_dict"]
+            for offset, file_name in enumerate(chunk):
+                idx = start + offset
+                self.progress_reporter.report(value=30 + int((idx / total_files) * 70))
+                print(file_name)
 
-            hook.save(f"data/final_prediction/{file_name}")
-            print(f"Angles found for {seed_ids}: {angle_dict}")
+                # Filenames are "{crop_id}-crop-{original_name}.png" (see
+                # cropped_sorted_filenames above) -- split on the first "-"
+                # rather than indexing the first character, which silently
+                # broke for crop_id >= 10.
+                crop_id = int(file_name.split("-", 1)[0])
+                result = self.process_single_frame(file_name, crop_id)
+                if result is None:
+                    continue
 
-            # Mirrors segment_single_seedling/SeedlingAnalysisWindow's own
-            # bookkeeping, so a seedling already segmented by this batch pass
-            # isn't redundantly re-segmented by "Preview seedling"/"Export results".
-            self.frame_results_by_crop.setdefault(crop_id, []).append(result)
-            self.cropped_filenames_by_crop.setdefault(crop_id, []).append(file_name)
+                hook = result["hook"]
+                seed_ids = result["seed_ids"]
+                angle_dict = result["angle_dict"]
 
-            # Save max angles (this part stays the same)
-            image_crops_angles[crop_id] = angle_dict
-            max_dict = image_crops_angles_max.setdefault(crop_id, {})
-            for sid, angle in angle_dict.items():
-                if isinstance(angle, (int, float)) and not np.isnan(angle):
-                    if sid not in max_dict or angle > max_dict.get(sid, float('-inf')):
-                        max_dict[sid] = angle
+                hook.save(f"data/final_prediction/{file_name}")
+                print(f"Angles found for {seed_ids}: {angle_dict}")
+
+                # Mirrors segment_single_seedling/SeedlingAnalysisWindow's own
+                # bookkeeping, so a seedling already segmented by this batch pass
+                # isn't redundantly re-segmented by "Preview seedling"/"Export results".
+                self.frame_results_by_crop.setdefault(crop_id, []).append(result)
+                self.cropped_filenames_by_crop.setdefault(crop_id, []).append(file_name)
+
+                # Save max angles (this part stays the same)
+                image_crops_angles[crop_id] = angle_dict
+                max_dict = image_crops_angles_max.setdefault(crop_id, {})
+                for sid, angle in angle_dict.items():
+                    if isinstance(angle, (int, float)) and not np.isnan(angle):
+                        if sid not in max_dict or angle > max_dict.get(sid, float('-inf')):
+                            max_dict[sid] = angle
+
+            # Germination masks (label "4") are consumed as contours by
+            # GerminationDetector and are never brush-editable, so the raw
+            # prediction can be freed as soon as this chunk's frames are
+            # processed. (The analysis window's germ overlay reads
+            # result["germ_mask"], its own thresholded copy, so it still renders
+            # after this.)
+            # Cotyledon ("1") and hypocotyl ("2") raw masks are deliberately
+            # KEPT for the whole session: SeedlingAnalysisWindow loads the raw
+            # prediction (not the post-processed mask in frame_results_by_crop)
+            # into MaskEditor, so dropping them would break brush editing after
+            # a batch run -- the old data/predict/ files survived until exit for
+            # exactly this reason.
+            # (kept when dumping, so the dump still contains every label)
+            if not self.dump_masks:
+                self.mask_store.discard_raw(chunk, labels=("4",))
 
         # Germination time-zero per seedling, from the germ_v1 mask time series
         # process_single_frame accumulated above, keyed by crop_id.
@@ -797,6 +805,12 @@ class Gui():
         angle_df = pd.DataFrame(rows, columns=["filename", "seedling_id", "angles", "tot_numb", "raw_angles", "states"])
         angle_df.to_csv("img_angle_data.csv", index=False)
         self.img_angle_data = angle_df
+
+        # Opt-in (DLHOOK_DUMP_MASKS=1): write the session's masks out in the
+        # legacy 0 = foreground on-disk convention, so they stay directly
+        # comparable with previously exported ground-truth masks.
+        if self.dump_masks:
+            self.mask_store.dump("data/predict/")
 
         if self.debug_var.get() == 0:
             with open("data/json_data/json_data.json", "w") as f:
@@ -837,6 +851,12 @@ class Gui():
         # seedling instead of assuming one global crop size.
         crop_size = (2 * box["half_w"] + 2 * box["half_h"]) / 2
         self.germination_detector.detect(crop_id, frame_contours, seed_point, crop_size)
+        # The thresholds are uncalibrated (no ground-truth germination timing
+        # exists to fit them against), so with Debug on, log what detect()
+        # actually measured -- all-zero areas mean the germ mask itself is
+        # empty, nonzero-but-below-threshold means the threshold needs tuning.
+        if self.debug_var.get() == 1:
+            print(f"[DEBUG] germination {self.germination_detector.describe(crop_id)}")
 
     def _reconstruct_series_for_crop(self, crop_id):
         """Runs the angle-through-time temporal reconstruction (see
@@ -942,11 +962,11 @@ class Gui():
         batch pipeline (run_apical_pipeline) and the Phase 5 per-seedling
         preview window, so both compute angles identically.
 
-        Masks are loaded via resolve_mask_path(), which prefers a Phase 7
-        brush-edited mask in data/postprocess/ over the raw data/predict/
-        prediction when one exists -- this is the only hook Phase 7's
-        "recompute after a manual mask edit" needs; the rest of this method
-        (threshold/erode/dilate/contour) is unchanged either way.
+        Masks are loaded from self.mask_store, which prefers a Phase 7
+        brush-edited mask over the raw prediction when one exists -- this is
+        the only hook Phase 7's "recompute after a manual mask edit" needs; the
+        rest of this method (threshold/erode/dilate/contour) is unchanged
+        either way.
 
         By default (frame_index=None) this appends onto
         self.cotyl_time_series_by_crop[crop_id]/germ_time_series_by_crop[crop_id],
@@ -966,9 +986,14 @@ class Gui():
         image_path = os.path.join("data/images", file_name)
         image = cv2.imread(image_path, cv2.IMREAD_COLOR)
 
-        img_cotyl = cv2.imread(resolve_mask_path(file_name, "1"), cv2.IMREAD_GRAYSCALE)
-        img_hypo = cv2.imread(resolve_mask_path(file_name, "2"), cv2.IMREAD_GRAYSCALE)
-        img_germ = cv2.imread(resolve_mask_path(file_name, "4"), cv2.IMREAD_GRAYSCALE)
+        # Masks come from the in-memory MaskStore (a brush-edited mask wins over
+        # the raw prediction, same precedence the old resolve_mask_path gave
+        # data/postprocess/ over data/predict/). They are already in the
+        # 255 = foreground convention, so none of the bitwise_not calls the
+        # old on-disk format required are needed here.
+        img_cotyl = self.mask_store.get(file_name, "1")
+        img_hypo = self.mask_store.get(file_name, "2")
+        img_germ = self.mask_store.get(file_name, "4")
 
         if image is None or img_cotyl is None or img_hypo is None:
             print(f"[WARNING] Skipping {file_name}: image or masks not found.")
@@ -977,6 +1002,13 @@ class Gui():
         # Process masks
         _, bin_cotyl = cv2.threshold(img_cotyl, 127, 255, cv2.THRESH_BINARY)
         _, bin_hypo = cv2.threshold(img_hypo, 127, 255, cv2.THRESH_BINARY)
+        # No bitwise_not on germ: the MaskStore hands out 255 = foreground for
+        # every label. Re-inverting germ here (which the old on-disk pipeline
+        # effectively did, and which this code reproduced deliberately) made
+        # every germ contour describe the crop's BACKGROUND -- a single
+        # near-full-frame rectangle, whose 4-point contour the >=5-point filter
+        # below then dropped. That is why germination detection returned None
+        # for every seedling.
         bin_germ = cv2.threshold(img_germ, 127, 255, cv2.THRESH_BINARY)[1] if img_germ is not None else None
 
         seed_points = self.crop_points_distributed[crop_id]
@@ -984,8 +1016,8 @@ class Gui():
 
         above_mask = cv2.bitwise_not(mask_below_seed_line(img_hypo.shape, seed_points))
 
-        cotyl_mask = cv2.bitwise_and(cv2.bitwise_not(bin_cotyl), cv2.bitwise_not(bin_cotyl), mask=above_mask)
-        hypo_mask = cv2.bitwise_and(cv2.bitwise_not(bin_hypo), cv2.bitwise_not(bin_hypo), mask=above_mask)
+        cotyl_mask = cv2.bitwise_and(bin_cotyl, bin_cotyl, mask=above_mask)
+        hypo_mask = cv2.bitwise_and(bin_hypo, bin_hypo, mask=above_mask)
 
         # Define kernel for morphological operations
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -999,12 +1031,19 @@ class Gui():
 
         cotyl_mask = PostprocessMasks.zoom_out_mask(cotyl_mask, scale=0.98)
         hypo_mask = PostprocessMasks.zoom_out_mask(hypo_mask, scale=0.98)
-        germ_mask = PostprocessMasks.zoom_out_mask(bin_germ, scale=0.98) if bin_germ is not None else None
+        # germ is NOT zoomed out: that helper shrinks the mask about the crop's
+        # center to detach blobs from the border, which displaces the germ blob
+        # relative to the seed coat point -- and the distance between those two
+        # is exactly what GerminationDetector measures.
+        germ_mask = bin_germ
 
-        # Extract contours
+        # Extract contours. The >= 5 point floor is a cv2.fitEllipse
+        # prerequisite in the cotyledon/hypocotyl angle path; germination only
+        # ever takes contourArea, and a small emerging radicle can legitimately
+        # trace fewer than 5 points, so germ is not filtered that way.
         cotyl_contours = [c for c in cv2.findContours(cotyl_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
         hypo_contours = [c for c in cv2.findContours(hypo_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
-        germ_contours = ([c for c in cv2.findContours(germ_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if len(c) >= 5]
+        germ_contours = (list(cv2.findContours(germ_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0])
                           if germ_mask is not None else [])
 
         cotyl_history = self.cotyl_time_series_by_crop.setdefault(crop_id, [])
@@ -1102,8 +1141,8 @@ class Gui():
     def segment_single_seedling(self, crop_id, progress_reporter=None):
         """
         Crops (if needed) and runs UNetInference scoped to just this one
-        seedling's own cropped frames, writing masks into data/predict/ same
-        as the batch pipeline -- lets a Phase 5 preview window spot-check one
+        seedling's own cropped frames, filling the shared mask_store same as
+        the batch pipeline -- lets a Phase 5 preview window spot-check one
         seedling without running inference over every other seedling too.
         Runs on a background thread; progress_reporter must be a
         ProgressReporter the caller polls on the main thread.
@@ -1119,13 +1158,13 @@ class Gui():
         # in the batch pipeline either -- skipped here to keep the on-demand
         # preview from running a model whose result nothing consumes.
         reporter.report(message="Running segmentation models...")
-        cotyledon_predictor = UNetInference(model_path="weights/RootPainter_weights/cotyledon_v5.pkl")
-        hypocot_predictor = UNetInference(model_path="weights/RootPainter_weights/hypocot_v5.pkl")
-        germ_predictor = UNetInference(model_path="weights/RootPainter_weights/germ_v1.pkl")
-
-        cotyledon_predictor.predict_files(file_paths, output_dir="data/predict/", label="1")
-        hypocot_predictor.predict_files(file_paths, output_dir="data/predict/", label="2")
-        germ_predictor.predict_files(file_paths, output_dir="data/predict/", label="4")
+        predictors = [
+            ("1", get_predictor("weights/RootPainter_weights/cotyledon_v5.pkl")),
+            ("2", get_predictor("weights/RootPainter_weights/hypocot_v5.pkl")),
+            ("4", get_predictor("weights/RootPainter_weights/germ_v1.pkl")),
+        ]
+        for label, predictor in predictors:
+            self.mask_store.put_raw_bulk(predictor.predict_files(file_paths, label=label), label)
 
         reporter.report(message="Computing angles...")
         return cropped_filenames
@@ -1303,59 +1342,32 @@ class Gui():
             self.new_df = pd.concat([self.new_df, row_df], ignore_index=True)
 
 
-    def add_files(self, path_input=None):
-        if path_input!=None:
-            self.listbox.delete(0, tk.END)
-            for file_n in path_input:
-                self.listbox.insert(tk.END, file_n)
-            self.file_list=path_input
+    def add_files(self):
+        """Pick an image folder and load its frames in acquisition order.
 
-        if self.filenames_listbox==True and path_input==None:
-            self.listbox.delete(0, tk.END)
-            self.path=askdirectory()
-            folder=self.path.split('/')
-            self.save_path=self.path_crop+folder[-1]
-
-            self.file_list=_list_image_files(self.path)
-
-            path=self.file_list
-
-
-            for file_n in path:
-                self.listbox.insert(tk.END, file_n)
-
-
-        if self.filenames_listbox==False and path_input==None:
+        (The old path_input argument, which let the removed manual filename-sort
+        section re-feed a reordered list, is gone -- ordering is no longer
+        something the user has to drive.)"""
+        if self.filenames_listbox==False:
             #Activate buttons
             self.btn_show_image["state"]=tk.NORMAL
-            #self.btn_sort["state"]=tk.NORMAL
 
+        self.path=askdirectory()
+        if not self.path:
+            return
+        folder=self.path.split('/')
+        self.save_path=self.path_crop+folder[-1]
 
-            self.path=askdirectory()
-            folder=self.path.split('/')
-            self.save_path=self.path_crop+folder[-1]
-            self.file_list=_list_image_files(self.path)
-            path=self.file_list
+        # Order the series BEFORE the listbox is filled: the listbox used to be
+        # populated from the raw directory listing and file_list re-sorted
+        # afterwards, so the two could disagree about frame order.
+        self.file_list, self.capture_times = order_series(self.path, _list_image_files(self.path))
+        self.filenames_listbox=True
 
-            for file_n in path:
-                self.listbox.insert(tk.END, file_n)
+        self.listbox.delete(0, tk.END)
+        for file_n in self.file_list:
+            self.listbox.insert(tk.END, file_n)
 
-            self.filenames_listbox=True
-
-            # Apply sorting logic
-        sorted_filenames = []
-        for file in self.file_list:
-            base_name = os.path.splitext(file)[0]
-            number_match = re.search(r'\d+', base_name)
-            if number_match:
-                sort_key = int(number_match.group())
-                sorted_filenames.append((sort_key, file))
-            else:
-                print(f"[DEBUG] No number found in: {file}")
-    
-        sorted_filenames.sort(key=lambda x: x[0])
-        self.file_list = [f[1] for f in sorted_filenames]
-        
             # Select and show the last image
         if self.file_list:
             last_index = len(self.file_list) - 1

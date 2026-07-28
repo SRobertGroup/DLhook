@@ -4,6 +4,7 @@ from unittest import result
 import cv2
 import glob
 import os
+import torch
 from basicsr.archs.rrdbnet_arch import RRDBNet
 from realesrgan import RealESRGANer
 from realesrgan.archs.srvgg_arch import SRVGGNetCompact
@@ -33,7 +34,8 @@ class RealesrganSuperresolution:
             tile=256,
             tile_pad=10,
             pre_pad=0,
-            half='store_true')
+            # Disable CUDA/fp16 due to Blackwell GPU incompatibility with current PyTorch
+            half=False)
 
     #Input: image in numnpy array format, returns the #upscaled-superres image numpy array format
     def enhance(self,img_np):

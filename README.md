@@ -6,7 +6,7 @@
 
 **Lead Development:** David Radianu, Adrien Heymans
 
-**Contributors:** Siamsa Doyle
+**Contributors:** Siamsa Doyle, Hemamshu Ratnakaram
 
 **Coordination:** Stéphanie Robert, Sara Raggi
 
@@ -233,12 +233,14 @@ The exported CSV is in **long format** — one row per seedling per frame:
 | `raw_angle` | the unmodified per-frame geometric reading, for auditing |
 | `state` | `Closed`, `Opening`, or `Manual` (a hand-placed angle) |
 | `bio_angle` | the reconstructed biological angle — **use this one** |
+| `time_elapsed_min` | time (min) |
+| `germination_frame` | frame which display germination of seedling | 
 
 ```csv
-img_name,seedling_id,raw_angle,state,bio_angle
-Col0_001.tif,1,178,Closed,179
-Col0_001.tif,2,175,Closed,176
-Col0_002.tif,1,172,Closed,174
+img_name,seedling_id,raw_angle,state,bio_angle,time_elapsed_min,germination_frame 
+Col0_001.tif,1,178,Closed,179,0,,
+Col0_001.tif,2,175,Closed,176,60,,
+Col0_002.tif,1,172,Closed,174,120,,
 ```
 
 Missing or unmeasurable values are written as empty strings.

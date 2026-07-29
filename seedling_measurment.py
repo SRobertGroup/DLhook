@@ -1245,21 +1245,26 @@ class Gui():
             self._reconstruct_series_for_crop(crop_id)
 
         self.progress_reporter.report(message="Building CSV...", value=90)
-        columns = ['img_name', 'seedling_id', 'raw_angle', 'state', 'bio_angle']
+        columns = ['img_name', 'seedling_id', 'raw_angle', 'state', 'bio_angle',
+                   'time_elapsed_min', 'germination_frame']
         rows = []
         for frame_idx, filename in enumerate(self.file_list):
+            elapsed = self.time_deltas[frame_idx].get("elapsed_minutes") if frame_idx < len(self.time_deltas) else None
             for crop_id in range(n_crops):
                 seed_id = crop_id + 1
                 frame_results = self.frame_results_by_crop.get(crop_id, [])
                 result = frame_results[frame_idx] if frame_idx < len(frame_results) else None
                 angle = result["angle_dict"].get(seed_id) if result else None
                 raw = result.get("raw_angle_dict", {}).get(seed_id, angle) if result else None
+                germ_frame = self.germination_detector.get_time_zero(crop_id) if self.germination_detector else None
                 rows.append({
                     'img_name': filename,
                     'seedling_id': seed_id,
                     'raw_angle': round(raw) if isinstance(raw, (int, float)) and not np.isnan(raw) else '',
                     'state': result.get("state_dict", {}).get(seed_id, '') if result else '',
                     'bio_angle': round(angle) if isinstance(angle, (int, float)) and not np.isnan(angle) else '',
+                    'time_elapsed_min': round(elapsed, 2) if isinstance(elapsed, (int, float)) and not np.isnan(elapsed) else '',
+                    'germination_frame': germ_frame if germ_frame is not None else '',
                 })
         export_df = pd.DataFrame(rows, columns=columns)
 

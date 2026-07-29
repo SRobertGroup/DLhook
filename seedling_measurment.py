@@ -36,6 +36,7 @@ try:
 except AttributeError:
     resample_filter = Image.ANTIALIAS  # Pillow < 10
 
+OPENCV_LOG_LEVEL="error"
 import cv2
 
 import torch
@@ -552,12 +553,17 @@ class Gui():
             for image in self.file_list
         ]
 
-        if metadata_has_gaps(self.metadata_list):
+        untrustworthy = metadata_has_gaps(self.metadata_list)
+        if untrustworthy:
+            n_missing = sum(1 for m in self.metadata_list if m["creation_time"] is None)
             # None here means the user cancelled the dialog; the kinematics
             # window then falls back to plotting against the frame index.
             self.fallback_interval_minutes = simpledialog.askfloat(
-                "Missing timestamp metadata",
-                "Some images are missing reliable creation-time metadata.\n"
+                "No usable capture times",
+                f"{n_missing} of {len(self.metadata_list)} images carry no capture time "
+                "in their metadata\n(and file creation/modification times are not a "
+                "substitute -- they record\nwhen this copy was written, not when the "
+                "image was taken).\n\n"
                 "Enter the interval between images (in minutes):",
                 parent=self.root,
                 minvalue=0.0,
@@ -565,7 +571,23 @@ class Gui():
         else:
             self.fallback_interval_minutes = None
 
-        self.time_deltas = compute_time_deltas(self.metadata_list, self.fallback_interval_minutes)
+        # When the timestamps are untrustworthy they are discarded outright
+        # rather than mixed with the interval -- see compute_time_deltas.
+        self.time_deltas = compute_time_deltas(
+            self.metadata_list,
+            self.fallback_interval_minutes,
+            trust_timestamps=not untrustworthy,
+        )
+
+        # Say which source the time axis came from; a wrong x-axis is otherwise
+        # indistinguishable from a right one just by looking at the plot.
+        if not untrustworthy:
+            source = "embedded capture times"
+        elif self.fallback_interval_minutes is not None:
+            source = f"user-supplied interval of {self.fallback_interval_minutes} min/frame"
+        else:
+            source = "nothing (prompt cancelled) -- kinematics will use frame index"
+        print(f"[INFO] Time axis from {source}")
 
     def _pump_progress(self):
         """Runs on the main thread; drains ProgressReporter events from the worker thread

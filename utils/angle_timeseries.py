@@ -83,6 +83,27 @@ BRANCH_CLOSE_ASYMMETRY = 2.0
 CLOSED_ANGLE_BIO = 180.0
 BRANCH_START_ANCHOR_WEIGHT = 0.1
 
+# Biologically admissible band for a reconstructed bio angle, used to restrict
+# which ellipse aliases _branch_candidates may offer at all. 0 is a hard floor:
+# below it the hook would have to bend past straight in the opposite direction,
+# which is not a hook geometry -- it is the mirror alias. 220 allows 40 degrees
+# of genuine overhook past closed (180) and is the tunable end.
+#
+# This band is what keeps the DP honest. Without it the alias lattice gives
+# every frame a candidate a little further along in the cheap direction, and
+# since a decreasing step costs 1x against BRANCH_CLOSE_ASYMMETRY for an
+# increasing one, the globally cheapest path is an unbounded drift rather than
+# the real trajectory. Measured on example_data/Camera_2/test_280726.csv (167
+# frames, 10 seedlings): unbounded below reached -314 with 6/10 seedlings going
+# negative; bounded below but not above it ran the other way to 359. Swept
+# 190/200/220/240/270 against the four F1_Plate_2_YS seedlings' manual ground
+# truth: mean/median error is IDENTICAL (11.5 / 6.0 degrees) at every ceiling
+# including none, so the band costs nothing in accuracy -- those seedlings never
+# need a value above 190 -- while 220 is the tightest ceiling that leaves the
+# Camera_2 run with no out-of-band frame at all.
+MIN_BIO_ANGLE = 0.0
+MAX_BIO_ANGLE = 250.0
+
 HAMPEL_WINDOW = 3
 HAMPEL_N_SIGMAS = 3.0
 # MAD-to-sigma scale factor for a normal distribution (0.6745 = the standard
@@ -126,25 +147,30 @@ def _branch_candidates(value):
     miscall, which shifts the reported value by exactly 180 (`value + 180`,
     and their composition `360 - value`).
 
-    Each of the four is offered BOTH in [0, 360) and in its `- 360`
-    representation, so the alignment DP can lay a trajectory on a continuous
-    line and let genuine overhook dip just past 180 (or a near-closed value
-    sit just below 0) instead of wrapping the full 360 and looking like a
-    huge jump. The base four-value set is closed under `x -> 180 - x`, so this
-    is convention-independent (identical whether `value` is expressed as
-    bio or raw).
+    All four are folded into [0, 360) and then restricted to the
+    biologically admissible [MIN_BIO_ANGLE, MAX_BIO_ANGLE] band. The base set is
+    closed under `x -> 180 - x`, so this is convention-independent (identical
+    whether `value` is expressed as bio or raw) and always has a member in
+    [0, 180] -- the admissible set can never come back empty.
+
+    NO `- 360` DUPLICATES, and no values above the band. Offering each alias a
+    second time 360 lower was meant to keep the DP's trajectory continuous
+    across the 0/360 seam; instead it made the lattice unbounded, which
+    _align_branches' asymmetric cost turns into a perpetual drift (see
+    MIN_BIO_ANGLE/MAX_BIO_ANGLE for the measured numbers). The seam it was
+    smoothing is one a real hook trajectory should never cross.
     """
-    base = {
+    base = sorted({
         value % 360.0,
         (180.0 - value) % 360.0,
         (value + 180.0) % 360.0,
         (360.0 - value) % 360.0,
-    }
-    out = set()
-    for b in base:
-        out.add(b)
-        out.add(b - 360.0)
-    return sorted(out)
+    })
+    admissible = [b for b in base if MIN_BIO_ANGLE <= b <= MAX_BIO_ANGLE]
+    # The guard is belt-and-braces: closure under x -> 180 - x means at least
+    # one member always lands in [0, 180]. Falling back to the closest-to-closed
+    # candidate keeps a frame present rather than dropping it.
+    return admissible or [min(base, key=lambda b: abs(b - CLOSED_ANGLE_BIO))]
 
 
 def _align_branches(angles, manual_mask):

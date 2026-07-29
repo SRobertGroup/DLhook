@@ -7,6 +7,8 @@ from utils.angle_timeseries import (
     CLOSED_STATE,
     OPENING_STATE,
     MANUAL_STATE,
+    MIN_BIO_ANGLE,
+    MAX_BIO_ANGLE,
 )
 
 # All angles below are in the BIO convention the module works in: 180 = closed,
@@ -74,6 +76,58 @@ def test_real_small_dips_are_not_flipped_away():
         assert abs(aligned[i] - a) < 6, (
             f"frame {i}: honest reading {a} was altered to {aligned[i]:.1f}"
         )
+
+
+def test_long_noisy_series_stays_in_the_biological_band():
+    # The runaway found on a real 167-frame Camera_2 run: the alias lattice used
+    # to offer every value a second time 360 lower, and since _align_branches
+    # charges only 1x for a decreasing step against BRANCH_CLOSE_ASYMMETRY for an
+    # increasing one, the cheapest whole-path solution was to convert this
+    # wobble into a steady descent and walk straight through 0 -- one seedling's
+    # input stayed inside [26, 179] while the output reached -314 degrees.
+    # Bounding the candidates below alone just sent it up through 360 instead,
+    # so both ends are checked here.
+    wobble = [90, 120, 70, 140, 60, 110, 95, 130, 45, 105]
+    angles = (wobble * 12)[:120]  # long enough for a drift to accumulate
+
+    angles_out, _ = reconstruct_series(angles)
+
+    for i, a in enumerate(angles_out):
+        assert MIN_BIO_ANGLE <= a <= MAX_BIO_ANGLE, (
+            f"frame {i}: {a:.1f} is outside the admissible "
+            f"[{MIN_BIO_ANGLE}, {MAX_BIO_ANGLE}] band"
+        )
+
+
+def test_gappy_series_does_not_drift_across_the_gaps():
+    # Same runaway, in the shape it actually appeared: roughly half the frames
+    # have no reading at all (the real run had 51-140 blanks out of 167), so the
+    # DP measures transitions between distant frames and has that much more room
+    # to drift.
+    wobble = [140, 75, 115, 50, 130, 60, 100, 85]
+    angles = []
+    for i in range(120):
+        angles.append(wobble[i % len(wobble)] if i % 2 == 0 else np.nan)
+
+    angles_out, _ = reconstruct_series(angles)
+
+    present = [a for a in angles_out if not np.isnan(a)]
+    assert present, "expected some frames to survive"
+    assert min(present) >= MIN_BIO_ANGLE
+    assert max(present) <= MAX_BIO_ANGLE
+
+
+def test_manual_override_is_not_clipped_to_the_band():
+    # A manual value is the user's assertion about that frame, so it is pinned
+    # as given even if it sits outside the band the automated aliases are
+    # restricted to. (Real runs contain user-placed values above 200.)
+    angles = [178, 176, 260, 176, 174]
+    is_manual = [False, False, True, False, False]
+
+    angles_out, states = reconstruct_series(angles, is_manual=is_manual)
+
+    assert angles_out[2] == 260
+    assert states[2] == MANUAL_STATE
 
 
 def test_single_frame_spike_is_rejected():

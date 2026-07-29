@@ -65,10 +65,15 @@ def _metadata_capture_times(path):
         with Image.open(path) as image:
             exif_data = image.getexif()
             if exif_data:
+                # DATETIME_IFD0 is looked for in BOTH IFDs, not just IFD0:
+                # example_data/Camera_1's rpicam-apps JPEGs put Make/Model/
+                # Software/DateTime inside the Exif sub-IFD, leaving IFD0 holding
+                # nothing but the pointer to it.
                 sub_ifd = exif_data.get_ifd(EXIF_IFD_POINTER) or {}
                 raw_values = [
                     sub_ifd.get(DATETIME_ORIGINAL),
                     sub_ifd.get(DATETIME_DIGITIZED),
+                    sub_ifd.get(DATETIME_IFD0),
                     exif_data.get(DATETIME_IFD0),
                 ]
             else:
@@ -90,39 +95,20 @@ def _metadata_capture_times(path):
     return candidates
 
 
-def _filesystem_times(path):
-    """The file's own creation/modification times, as a list of datetimes."""
-    try:
-        stat = os.stat(path)
-    except OSError as e:
-        print(f"[ERROR] Could not stat {path}: {e}")
-        return []
-    return [datetime.datetime.fromtimestamp(ts) for ts in (stat.st_ctime, stat.st_mtime)]
-
-
-def get_init_time(path):
-    """Fallback when nothing is embedded in the file: the earlier of its
-    creation and modification times. (On Windows st_ctime is creation time and
-    survives a copy, while st_mtime does not; on Linux st_ctime is inode-change
-    time. Taking the minimum is the closest either platform gets to "when this
-    image first existed".)"""
-    times = _filesystem_times(path)
-    return min(times) if times else None
-
-
-def get_image_creation_time(path):
+def get_capture_time(path):
     """The image's capture time: the earliest timestamp embedded in the file
-    itself, falling back to the filesystem only when the file carries none.
+    itself, or None if it carries none.
 
-    Embedded tags win outright rather than competing with the filesystem times,
-    because copying/re-encoding a series resets st_mtime (and, off Windows,
-    st_ctime) to the copy date -- letting those compete would mean the earliest
-    "time" for a copied series is whichever file the OS happened to touch
-    first, which is not acquisition order at all."""
+    THERE IS NO FILESYSTEM FALLBACK, deliberately. st_ctime/st_mtime record when
+    this *copy of the file* was written, not when the image was taken, and both
+    real datasets in example_data/ prove how badly that misleads: all 168
+    Camera_1 JPEGs share ONE filesystem timestamp, and the 50 F1_Plate_2_YS
+    TIFFs share TWO (not in frame order). An elapsed-time axis built from those
+    silently collapses to a single point, which is worse than having no axis --
+    at least None is detectable, and lets the caller ask the user for the frame
+    interval instead (see metadata_has_gaps/compute_time_deltas)."""
     embedded = _metadata_capture_times(path)
-    if embedded:
-        return min(embedded)
-    return get_init_time(path)
+    return min(embedded) if embedded else None
 
 
 def filename_sort_key(file_name):
@@ -137,34 +123,23 @@ def order_series(path, filenames):
     Put a time series into acquisition order, returning
     (ordered_filenames, {filename: capture_time or None}).
 
-    ORDER comes from timestamps embedded in the files themselves, when every
-    frame has one and they aren't all identical. Filesystem times are
-    deliberately NOT allowed to decide order: copying or re-encoding a folder
-    rewrites them in whatever sequence the OS touched the files, which is not
-    acquisition order and gives no warning when it's wrong. Without embedded
-    timestamps this falls back to the legacy first-integer-in-the-filename key
-    -- also imperfect (every frame of example_data/Camera_1 yields the same key
-    13 from "RPV_13_0.jpg", so the sort degenerates to a lexicographic no-op
-    that puts "..._100" before "..._2") but at least deliberate.
-
-    The returned capture times still fall back to the filesystem per file, since
-    an approximate elapsed-minutes x-axis beats none at all -- and if those turn
-    out non-monotonic in the chosen order, metadata_has_gaps() will say so and
-    the caller can ask the user for a frame interval instead.
+    ORDER comes from the timestamps embedded in the files themselves, when every
+    frame has one and they aren't all identical. Filesystem times are never used
+    (see get_capture_time). Without embedded timestamps this falls back to the
+    legacy first-integer-in-the-filename key -- also imperfect, since it takes
+    the FIRST run of digits: every frame of example_data/Camera_1 keys on 13
+    (from "RPV_13_0.jpg") and every frame of F1_Plate_2_YS keys on 1 (from
+    "F1 Plate 2000.tif"), so the sort degenerates to the lexicographic tiebreak.
+    That happens to be right for F1_Plate_2_YS (fixed-width numbering) and badly
+    wrong for Camera_1 (which is why its 168 frames used to load as 0, 1, 10,
+    100, 101, ... -- fixed here by its timestamps being read at last).
     """
-    embedded = {}
-    capture_times = {}
-    for file_name in filenames:
-        file_path = os.path.join(path, file_name)
-        candidates = _metadata_capture_times(file_path)
-        embedded[file_name] = min(candidates) if candidates else None
-        capture_times[file_name] = (embedded[file_name] if embedded[file_name] is not None
-                                     else get_init_time(file_path))
+    capture_times = {f: get_capture_time(os.path.join(path, f)) for f in filenames}
 
-    times = list(embedded.values())
+    times = list(capture_times.values())
     usable = all(t is not None for t in times) and len(set(times)) > 1
     if usable:
-        ordered = sorted(filenames, key=lambda f: (embedded[f], f))
+        ordered = sorted(filenames, key=lambda f: (capture_times[f], f))
     else:
         ordered = sorted(filenames, key=lambda f: (filename_sort_key(f), f))
 
@@ -173,27 +148,35 @@ def order_series(path, filenames):
 
 def metadata_has_gaps(metadata_list):
     """
-    True if any image is missing a usable creation_time, or if the recovered
-    timestamps aren't monotonically non-decreasing (a sign the metadata can't
-    be trusted to reflect real acquisition order/spacing).
+    True if the timestamps can't be trusted to describe the real acquisition
+    times: any frame missing one, or the series not STRICTLY increasing.
 
-    The non-monotonic branch stays reachable after order_series(): that only
-    sorts by *embedded* timestamps, so a series ordered by filename key can
-    still carry filesystem-derived times that jump around -- exactly the case
-    where the caller should stop trusting them and ask for a frame interval.
+    Strictly, not merely non-decreasing: two frames of a growth time series
+    cannot share a capture instant, so duplicates mean the timestamps aren't
+    per-frame capture times at all. Requiring only non-decreasing used to let
+    the worst case through silently -- a whole folder stamped with one identical
+    time passes a monotonic check, then every frame lands at elapsed_minutes=0
+    and the kinematics x-axis collapses to a single point with no warning.
     """
     times = [m.get("creation_time") for m in metadata_list]
     if any(t is None for t in times):
         return True
-    return any(b < a for a, b in zip(times, times[1:]))
+    return any(b <= a for a, b in zip(times, times[1:]))
 
 
-def compute_time_deltas(metadata_list, fallback_interval_minutes=None):
+def compute_time_deltas(metadata_list, fallback_interval_minutes=None, trust_timestamps=True):
     """
     Convert per-image timestamps into elapsed minutes since the earliest valid
     timestamp in the series. If an entry's own timestamp is missing and
     fallback_interval_minutes is given, its elapsed time is estimated instead
     as index * fallback_interval_minutes.
+
+    Pass trust_timestamps=False (i.e. metadata_has_gaps said so) to ignore the
+    timestamps entirely and build the whole axis from the interval. Without
+    that, a series whose timestamps are present but untrustworthy -- all
+    identical, say -- kept using them and silently discarded the interval the
+    user had just been prompted for, which is precisely the case the prompt
+    exists to rescue.
 
     Returns a new list of dicts (input dicts are not mutated), each augmented
     with an "elapsed_minutes" key (float, or None if it can't be determined).
@@ -201,13 +184,16 @@ def compute_time_deltas(metadata_list, fallback_interval_minutes=None):
     # Anchored on the earliest timestamp, not the first one in list order: those
     # coincide for a time-sorted series, but anchoring on list order would emit
     # negative elapsed times for any caller that passes an unsorted list.
-    valid_times = [m["creation_time"] for m in metadata_list if m.get("creation_time") is not None]
-    origin = min(valid_times) if valid_times else None
+    if trust_timestamps:
+        valid_times = [m["creation_time"] for m in metadata_list if m.get("creation_time") is not None]
+        origin = min(valid_times) if valid_times else None
+    else:
+        origin = None
 
     result = []
     for idx, entry in enumerate(metadata_list):
         entry = dict(entry)
-        ts = entry.get("creation_time")
+        ts = entry.get("creation_time") if trust_timestamps else None
         if ts is not None and origin is not None:
             entry["elapsed_minutes"] = (ts - origin).total_seconds() / 60
         elif fallback_interval_minutes is not None:

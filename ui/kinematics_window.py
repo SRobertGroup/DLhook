@@ -124,8 +124,8 @@ class KinematicsWindow(tk.Toplevel):
             style = "--" if unaligned else "-"
             line_color = SEEDLING_LINE_COLORS[crop_id % len(SEEDLING_LINE_COLORS)]
             label = f"Seedling {seed_id}" + (" (ungerminated)" if unaligned else "")
-            self.ax.plot(xs_sorted, ys_sorted, style, color=line_color, linewidth=1, zorder=1)
-            self.ax.scatter(xs_sorted, ys_sorted, c=colors_sorted, zorder=2, s=18)
+            self.ax.plot(xs_sorted/60, ys_sorted, style, color=line_color, linewidth=1, zorder=1)
+            self.ax.scatter(xs_sorted/60, ys_sorted, c=colors_sorted, zorder=2, s=18)
             seedling_handles.append(Line2D([], [], linestyle=style, color=line_color,
                                             linewidth=1, label=label))
 
@@ -133,7 +133,7 @@ class KinematicsWindow(tk.Toplevel):
             self.ax.text(0.5, 0.5, "No results yet -- run Start Analysis or preview a seedling",
                          ha="center", va="center", transform=self.ax.transAxes)
         else:
-            x_label = "Time since germination (min)" if use_time_deltas else "Frame index since germination"
+            x_label = "Time since germination (h)" if use_time_deltas else "Frame index since germination"
             self.ax.set_xlabel(x_label)
             self.ax.set_ylabel("Angle (deg)")
             self.ax.axhline(180, color="0.85", linewidth=1, zorder=0)

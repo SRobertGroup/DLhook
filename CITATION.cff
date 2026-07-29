@@ -13,8 +13,8 @@ authors:
   - family-names: Raggi
     given-names: Sara
 date-released: 2025-06-04
-version: "0.2.0"
-license: MIT
+version: "0.3.0"
+license: GPL-3.0
 repository-code: https://github.com/SRobertGroup/DLhook
 abstract: >
   DLhook is an open-source GUI software for high-throughput measurement of apical hook angles in dark-grown Arabidopsis thaliana seedlings. It uses deep learning (U-Net) for image segmentation and post-processing to quantify phenotypic traits with minimal manual input.

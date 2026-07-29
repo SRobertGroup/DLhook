@@ -295,4 +295,4 @@ The segmentation network architecture and the trained weights derive from [RootP
 
 Please cite this repository while we work on the manuscript describing the method (see also [`CITATION.cff`](CITATION.cff)):
 
-> David Radianu, Adrien Heymans, Siamsa Doyle, Stéphanie Robert\*, Sara Raggi\* (2025). DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings. v0.3.0.
+> David Radianu, Adrien Heymans, Siamsa Doyle, Hemamshu Ratnakaram, Stéphanie Robert\*, Sara Raggi\* (2025). DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings. v0.3.0.

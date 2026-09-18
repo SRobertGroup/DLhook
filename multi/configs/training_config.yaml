@@ -1,0 +1,156 @@
+# Paths are resolved against a data root: --data-root, else the
+# DLHOOK_DATA_ROOT env var, else the repo root (see multi/src/config.py).
+# Absolute paths (weights_* below, and everything under `evaluation:`) are
+# used as-is regardless of data root. Same file is meant to be used unedited
+# for local dev and any other host -- only the `evaluation:` annotations
+# paths are this machine's; point DLHOOK_DATA_ROOT or edit them for a
+# different box.
+paths:
+  # The training run's raw crops and their pseudo-labels. raw_data_dir holds
+  # the crops themselves; probability_maps_dir the per-class probability PNGs
+  # a separate segment_crops.py-style producer writes for them
+  # ({crop_stem}-{cotyledon|hypocotyl|radicle}.png, 255 = high probability);
+  # multiclass_masks_dir the merged single-channel label PNGs mask_merge.py
+  # (or merge_masks.py --from-probs) produces from those probability maps.
+  # None of the three are the 441 human-annotated validation crops -- those
+  # live under `evaluation:` below and are never part of the training run.
+  raw_data_dir: cropped_training_set
+  probability_maps_dir: cropped_training_set_seg
+  multiclass_masks_dir: cropped_training_set_labels
+  weights_cotyledon: weights/RootPainter_weights/cotyledon_v5.pkl
+  weights_hypocotyl: weights/RootPainter_weights/hypocot_v5.pkl
+  weights_radicle: weights/RootPainter_weights/germ_v2.pkl
+  processed_dir: multi/processed
+  multiclass_preview_dir: multi/processed/masks_multiclass_preview
+  mask_merge_report: multi/processed/mask_merge_report.csv
+  patch_index_dir: multi/processed/patch_index
+  checkpoints_dir: multi/results/models
+  logs_dir: multi/results/logs
+  predictions_dir: multi/results/predictions
+
+# Validation-only. The 441 RootPainter-annotated crops in training_dataset/dlhook
+# were held out and never used for training; multi/evaluate_multiclass.py scores
+# a trained model (and the three binary baselines) against them. build_patch_index.py
+# also reads the annotations_* dirs here (evaluation-only, read-only) to keep each
+# annotated image's train/val split membership consistent with RootPainter's own.
+evaluation:
+  raw_data_dir: training_dataset/dlhook
+  annotations_cotyledon: "C:/Users/heymansad/Documents/Root_Painter_Sync/dlhook_cotyledon/annotations"
+  annotations_hypocotyl: "C:/Users/heymansad/Documents/Root_Painter_Sync/dlhook_hypocotyl/annotations"
+  annotations_radicle: "C:/Users/heymansad/Documents/Root_Painter_Sync/dlhook_germ/annotations"
+
+data:
+  # Sized to the DATA, not to the inference tile. The hand-drawn crops are
+  # narrow strips: median 74 x 246 px, max width 232 (cropped_training_set/
+  # manifest.csv). At the old patch_size 572 every one of the 2384 crops was
+  # narrower than the patch, so the median patch was 94.5% reflect-padding and
+  # only 5.5% real content. 252 is the smallest valid UNetGNRes size
+  # (models/unet.py:get_valid_patch_sizes = 572 - 16*i) that still contains
+  # every crop's full width, raising median real content to ~29% and cutting
+  # per-patch compute ~5x. Crops taller than the patch tile vertically.
+  patch_size: 252
+  train_stride: 220
+  val_fraction: 0.15
+  split_level: image  # patches from one image never straddle train/val, see src/patch_index.py
+  split_seed: 42
+  num_classes: 4
+  class_names: [background, cotyledon, hypocotyl, radicle]
+  # Read by PatchDataset via train_unet_multiclass.py (data_cfg.get(...) with
+  # these exact defaults) -- explicit here so the root project's config no
+  # longer relies on a silent fallback. raw_ext: extension of the raw crop
+  # images. binarize_mask: whether mask pixel values need {0,255}->{0,1}
+  # collapsing before use (False here -- multiclass masks already store class
+  # indices 0-3/255, not a binary 0/255 mask; see multi/Readme.md).
+  raw_ext: ".png"
+  binarize_mask: false
+  min_foreground_fraction: 0.001
+  background_keep_ratio: 1.0
+  # Per-class (t_lo, t_hi) vote thresholds and the conflict margin used by
+  # src/mask_merge.py -- see its module docstring for the merge algorithm.
+  class_thresholds:
+    cotyledon: [0.05, 0.5]
+    hypocotyl: [0.05, 0.5]
+    radicle: [0.02, 0.3]
+  conflict_margin: 0.15
+
+augmentation:
+  enabled: true
+  rotation_degrees: 15
+  horizontal_flip: true
+  # Seedlings are gravitropically oriented -- a vertical flip is not
+  # label-preserving. Must stay False; src/data_loader.py warns and ignores
+  # it otherwise.
+  vertical_flip: false
+  brightness_jitter: 0.2
+  contrast_jitter: 0.2
+
+model:
+  in_channels: 3
+  num_classes: 4  # must match data.num_classes, checked by src/config.load_config
+  # Classification head (models/unet.py:build_conv_out):
+  #   groupnorm (default, and what every shipped RootPainter checkpoint was
+  #     trained with): Conv2d -> ReLU -> GroupNorm(n_classes, n_classes).
+  #     One group per channel = per-image instance norm of each class's
+  #     logits, so the network cannot express "this class is absent in this
+  #     image" -- every class always has high-scoring pixels somewhere. The
+  #     ReLU also clamps negative logits to 0, erasing "confidently not this
+  #     class". Suspected driver of the low precision (0.156 hypocotyl,
+  #     0.379 cotyledon vs the teachers' 0.90+) in session_recap.md.
+  #   plain: bare 1x1 Conv2d, no ReLU, no GroupNorm.
+  # Checkpoints record no metadata, so the head is inferred from their keys
+  # at load time (multi/src/model.py:head_from_state_dict) -- the two heads
+  # are NOT checkpoint-compatible with each other.
+  # Measured 2026-09-17: `plain` was trained under otherwise identical settings
+  # and did NOT fix the precision gap it was meant to (hypocotyl micro-precision
+  # 0.156 -> 0.170 against human annotations, vs the teacher's 0.957), while
+  # costing recall and six more whole-image radicle misses. Kept as a supported,
+  # tested option; not the default. See session_recap.md.
+  head: groupnorm
+  # Optional: start training from the shipped cotyledon encoder rather than
+  # random init (every layer except the n_classes-shaped conv_out is loaded).
+  # warm_start_from: weights/RootPainter_weights/cotyledon_v5.pkl
+  warm_start_from: null
+
+loss:
+  # focal, not cross_entropy: the merged label set is background 95.9%,
+  # hypocotyl 3.1%, cotyledon 0.24%, radicle 0.15% (multi/processed/
+  # mask_merge_report.csv). Plain CE scores 95.9% by predicting background
+  # everywhere and collapses the two rare classes; focal_alpha below
+  # downweights background and gamma=2 focuses the loss on hard pixels.
+  type: focal  # or "cross_entropy"
+  ignore_index: 255
+  class_weights: null
+  focal_gamma: 2.0
+  focal_alpha: [0.05, 0.35, 0.35, 0.25]  # background, cotyledon, hypocotyl, radicle
+
+training:
+  batch_size: 4
+  num_epochs: 100
+  optimizer: adamw
+  lr_max: 1.0e-3
+  lr_min: 1.0e-5
+  lr_warmup_epochs: 5
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  early_stopping_patience: 15
+  # Drives BOTH best-checkpoint selection and early stopping.
+  # "val_loss" (the old behaviour) is near-useless here: background is 95.9% of
+  # pixels, so loss is dominated by it. Measured on a 3-epoch run, val_loss
+  # improved 44% (0.0103 -> 0.0058) between two epochs while cotyledon Dice got
+  # WORSE (0.4465 -> 0.4224) -- a regression the old signal could not see.
+  # mean_fg_dice averages Dice over classes 1..3 only, excluding background.
+  selection_metric: mean_fg_dice  # or "val_loss" for the old raw-loss behaviour
+  device: auto  # auto-detects cuda, falls back to cpu; override with "cuda" or "cpu"
+  num_workers: 2  # Windows spawns DataLoader workers -- keep this small (0-4)
+  seed: 42
+  mixed_precision: true
+
+logging:
+  # train_unet_multiclass.py writes a plain per-epoch CSV to logs_dir and
+  # imports no tensorboard -- there used to be a "backend: tensorboard" key
+  # here that the trainer never read or acted on; removed rather than
+  # implemented, since nothing in this pipeline needs a tensorboard writer.
+  log_every_n_steps: 10
+
+debug:
+  tiny_subset_n_images: 15

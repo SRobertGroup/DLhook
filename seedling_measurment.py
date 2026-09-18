@@ -1171,7 +1171,7 @@ class Gui():
         """
         reporter = progress_reporter or self.progress_reporter
 
-        reporter.report(message=f"Cropping seedling {crop_id}...")
+        reporter.report(message=f"Cropping seedling {crop_id + 1}...")
         self.reset_frame_accumulators(crop_id)
         cropped_filenames = self.crop_single_seedling(crop_id)
         file_paths = [os.path.join("data/images", f) for f in cropped_filenames]
@@ -1203,7 +1203,10 @@ class Gui():
 
         listbox = tk.Listbox(picker, width=20, height=min(10, len(self.crop_boxes)))
         for i in range(len(self.crop_boxes)):
-            listbox.insert(tk.END, f"Seedling {i}")
+            # Labelled 1-based to match the kinematics legend and the export's
+            # seedling_id; the row index handed to SeedlingAnalysisWindow below
+            # is still the 0-based crop_id.
+            listbox.insert(tk.END, f"Seedling {i + 1}")
         listbox.pack(padx=8, pady=8)
 
         def _open_selected():
@@ -1229,7 +1232,7 @@ class Gui():
         for crop_id in range(n_crops):
             if crop_id in self.frame_results_by_crop:
                 continue
-            self.progress_reporter.report(message=f"Segmenting seedling {crop_id}...",
+            self.progress_reporter.report(message=f"Segmenting seedling {crop_id + 1}...",
                                            value=int((crop_id / n_crops) * 80))
             cropped_filenames = self.segment_single_seedling(crop_id, progress_reporter=self.progress_reporter)
             results = [self.process_single_frame(file_name, crop_id) for file_name in cropped_filenames]

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "mode": "multiclass",
+  "classes": [
+    { "index": 0, "name": "background", "rgba": [0, 0, 0, 0], "shortcut": "0" },
+    { "index": 1, "name": "cotyledon", "rgba": [220, 20, 60, 180], "shortcut": "1" },
+    { "index": 2, "name": "hypocotyl", "rgba": [30, 144, 255, 180], "shortcut": "2" },
+    { "index": 3, "name": "radicle", "rgba": [50, 205, 50, 180], "shortcut": "3" }
+  ]
+}

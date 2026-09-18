@@ -46,7 +46,9 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         super().__init__(gui.root)
         self.gui = gui
         self.crop_id = crop_id
-        self.title(f"Seedling {crop_id} - analysis")
+        # 1-based in the UI, matching the kinematics legend, the angle readout
+        # below and the export's seedling_id; crop_id itself stays 0-based.
+        self.title(f"Seedling {crop_id + 1} - analysis")
 
         self.cropped_filenames = []
         self.frame_results = []
@@ -447,6 +449,14 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         result["angle_dict"][seed_id] = self._manual_angle_value
         result.setdefault("state_dict", {})[seed_id] = "Manual"
         self._sync_angle_list(result)
+        # A manual override is a fixed anchor for the temporal reconstruction,
+        # so re-run it over this seedling's whole series: the corrected frame
+        # pulls the surrounding frames onto the right branch (see
+        # Gui._reconstruct_series_for_crop / angle_timeseries._align_branches).
+        # Same contract as _recompute_angle above; it reconstructs from each
+        # frame's untouched raw_angle_dict, so repeated overrides compose
+        # instead of re-smoothing an already-reconstructed value.
+        self.gui._reconstruct_series_for_crop(self.crop_id)
         self._reset_manual_angle()
         self._render_current_frame()
 
@@ -460,6 +470,11 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         result["angle_dict"][seed_id] = np.nan
         result.setdefault("state_dict", {})[seed_id] = "Manual"
         self._sync_angle_list(result)
+        # Same re-anchoring as _replace_angle: a blanked frame stays NaN
+        # (_align_branches skips missing frames, and the reconstruction never
+        # writes back to a "Manual" one), but dropping a bad reading out of the
+        # branch-alignment input lets its neighbours re-resolve.
+        self.gui._reconstruct_series_for_crop(self.crop_id)
         self._render_current_frame()
 
     # --- Germination time-zero -------------------------------------------

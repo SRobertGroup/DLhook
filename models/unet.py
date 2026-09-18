@@ -102,8 +102,50 @@ class UpBlock(nn.Module):
         return out
 
 
+HEAD_GROUPNORM = 'groupnorm'
+HEAD_PLAIN = 'plain'
+VALID_HEADS = (HEAD_GROUPNORM, HEAD_PLAIN)
+
+
+def build_conv_out(n_classes, head=HEAD_GROUPNORM):
+    """Build the classification head.
+
+    'groupnorm' (the default, and the ONLY behaviour before this parameter
+    existed) is Conv2d -> ReLU -> GroupNorm(n_classes, n_classes). Every
+    shipped RootPainter checkpoint under weights/ was trained with it, and
+    models/UNetInference.py (the live GUI path) constructs UNetGNRes() with
+    no arguments, so this default must never change: it produces
+    conv_out.0.{weight,bias} plus conv_out.2.{weight,bias}.
+
+    'plain' is a bare 1x1 Conv2d -- no ReLU, no GroupNorm -- and produces
+    only conv_out.0.{weight,bias}. One group per channel makes the GroupNorm
+    an *instance* norm over each class channel independently, per image, so
+    every class is rescaled to zero mean / unit variance in every image and
+    the network structurally cannot output "this class is absent here"; the
+    preceding ReLU additionally clamps every negative logit to 0, erasing
+    the "confidently not this class" signal. For classes covering ~0.1-0.2%
+    of pixels that drives over-prediction (a precision-side failure). The
+    plain head is the opt-in alternative under test -- see multi/Readme.md.
+
+    Both variants are wrapped in nn.Sequential so the conv is `conv_out.0`
+    either way, i.e. the plain head's keys are a strict subset of the
+    groupnorm head's.
+    """
+    if head == HEAD_GROUPNORM:
+        return nn.Sequential(
+            nn.Conv2d(64, n_classes, kernel_size=1, padding=0),
+            nn.ReLU(),
+            nn.GroupNorm(n_classes, n_classes)
+        )
+    if head == HEAD_PLAIN:
+        return nn.Sequential(
+            nn.Conv2d(64, n_classes, kernel_size=1, padding=0)
+        )
+    raise ValueError(f"head must be one of {VALID_HEADS}, got {head!r}")
+
+
 class UNetGNRes(nn.Module):
-    def __init__(self, im_channels=3):
+    def __init__(self, im_channels=3, n_classes=2, head=HEAD_GROUPNORM):
         super().__init__()
         self.conv_in = nn.Sequential(
             nn.Conv2d(im_channels, 64, kernel_size=3, padding=1),  # padding 0
@@ -122,11 +164,12 @@ class UNetGNRes(nn.Module):
         self.up2 = UpBlock(64)
         self.up3 = UpBlock(64)
         self.up4 = UpBlock(64)
-        self.conv_out = nn.Sequential(
-            nn.Conv2d(64, 2, kernel_size=1, padding=0),
-            nn.ReLU(),
-            nn.GroupNorm(2, 2)
-        )
+        # n_classes defaults to 2 and head defaults to 'groupnorm' so every
+        # existing binary checkpoint (and the GUI, via
+        # models/UNetInference.py) keeps loading unmodified; multi/'s 4-class
+        # training passes n_classes=4, and optionally head='plain'.
+        self.head = head
+        self.conv_out = build_conv_out(n_classes, head)
 
     def forward(self, x):
         out1 = self.conv_in(x)

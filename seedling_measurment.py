@@ -11,6 +11,7 @@ from tkinter.ttk import Progressbar, Style, Separator
 from tkinter.filedialog import asksaveasfilename, askdirectory
 from tkinter import simpledialog, messagebox
 from models.UNetInference import *  # RootPainter
+from models.segmentation_backends import get_backend, resolve_backend_name
 # from numpy.lib.function_base import select
 from utils.apicalhook_angle import *
 from utils.angle_timeseries import reconstruct_series, sync_angle_and_state_lists
@@ -701,18 +702,16 @@ class Gui():
         self.progress_reporter.report(done=True)
 
 
-    def run_apical_pipeline(self):
-        # Predict masks with Pytorch CNN from RootPainter. Models are fetched
-        # from the process-wide cache (get_predictor) so each weight file loads
-        # from disk once and is shared with the per-seedling preview path.
-        # cotyledon_v3 (label "3") is deliberately not run: process_single_frame
-        # only ever reads labels 1/2/4, so segmenting it was pure wasted compute.
-        predictors = [
-            ("1", get_predictor("weights/RootPainter_weights/cotyledon_v5.pkl")),
-            ("2", get_predictor("weights/RootPainter_weights/hypocot_v5.pkl")),
-            ("4", get_predictor("weights/RootPainter_weights/germ_v1.pkl")),
-        ]
+    def _segment_paths(self, paths):
+        """Segment `paths` with the configured backend and store every
+        label's masks into self.mask_store. Which models actually run (and
+        why cotyledon_v3 / label "3" is skipped) lives in
+        models/segmentation_backends.py -- this just delegates to whichever
+        backend resolve_backend_name() picks. No chunking here: the caller
+        decides whether/how to chunk its file list before calling this."""
+        get_backend(resolve_backend_name()).predict_into(self.mask_store, paths)
 
+    def run_apical_pipeline(self):
         image_crops_angles = {}
         image_crops_angles_max = {}
 
@@ -732,16 +731,16 @@ class Gui():
 
         # Inference and per-frame processing are INTERLEAVED in chunks rather
         # than run as three whole-dataset passes followed by a frame loop. All
-        # three models stay resident (get_predictor caches them), so alternating
-        # between them per chunk costs no reloads -- and it means only one
-        # chunk's worth of raw masks is ever held at once, instead of every
-        # mask for the whole run.
+        # three models stay resident (the backend's own process-wide cache,
+        # see models/segmentation_backends.py), so alternating between them
+        # per chunk costs no reloads -- and it means only one chunk's worth
+        # of raw masks is ever held at once, instead of every mask for the
+        # whole run.
         for start in range(0, total_files, IMAGE_CHUNK):
             chunk = self.cropped_sorted_filenames[start:start + IMAGE_CHUNK]
             chunk_paths = [os.path.join("data/images", f) for f in chunk]
 
-            for label, predictor in predictors:
-                self.mask_store.put_raw_bulk(predictor.predict_files(chunk_paths, label=label), label)
+            self._segment_paths(chunk_paths)
 
             for offset, file_name in enumerate(chunk):
                 idx = start + offset
@@ -1176,17 +1175,8 @@ class Gui():
         cropped_filenames = self.crop_single_seedling(crop_id)
         file_paths = [os.path.join("data/images", f) for f in cropped_filenames]
 
-        # cotyledon_v3's output ("-3.png") isn't read by process_single_frame
-        # in the batch pipeline either -- skipped here to keep the on-demand
-        # preview from running a model whose result nothing consumes.
         reporter.report(message="Running segmentation models...")
-        predictors = [
-            ("1", get_predictor("weights/RootPainter_weights/cotyledon_v5.pkl")),
-            ("2", get_predictor("weights/RootPainter_weights/hypocot_v5.pkl")),
-            ("4", get_predictor("weights/RootPainter_weights/germ_v1.pkl")),
-        ]
-        for label, predictor in predictors:
-            self.mask_store.put_raw_bulk(predictor.predict_files(file_paths, label=label), label)
+        self._segment_paths(file_paths)
 
         reporter.report(message="Computing angles...")
         return cropped_filenames

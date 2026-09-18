@@ -7,45 +7,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .config import ensure_repo_root_importable
+
+ensure_repo_root_importable()
+
+from models.unet import align_output_to_target  # noqa: E402,F401  (moved to models/unet.py; re-exported for existing callers)
+
 DEFAULT_IGNORE_INDEX = 255
-
-
-def align_output_to_target(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Center-crop a model's spatial output down to `target`'s spatial size,
-    if they differ.
-
-    UNetGNRes's output is always a multiple of 16 (four MaxPool2d(2) stages
-    -- see models/unet.py), so it is only ever exactly `input - 2*MARGIN`
-    when `input` is itself in models/unet.py:get_valid_patch_sizes()'s family
-    (input % 16 == 12, same residue as the historical IN_SIZE=572). PatchDataset
-    feeds the model `patch_size + 2*MARGIN` (see multi/src/data_loader.py),
-    which shifts that residue, so for every patch_size in that family the
-    model's real output comes back exactly 4px larger (2px/side) than
-    `patch_size` -- a constant, deterministic remainder of the architecture's
-    granularity, not a sizing bug in the dataset. Crop that remainder off the
-    model's own freshly computed output here, right before the loss (the
-    original crash site, multi/train_unet_multiclass.py:65-66 ->
-    multi/src/loss_functions.py:38) -- this never touches or discards any of
-    the label's own hand/pseudo-labelled pixels.
-
-    Raises if `output` is smaller than `target` in either spatial dimension:
-    that would mean PatchDataset's margin was too small for this patch_size,
-    which should never happen with MARGIN imported from
-    models/UNetInference.py, but must fail loudly rather than silently
-    misalign predictions against labels if it ever does.
-    """
-    oh, ow = output.shape[-2:]
-    th, tw = target.shape[-2:]
-    if (oh, ow) == (th, tw):
-        return output
-    if oh < th or ow < tw:
-        raise RuntimeError(
-            f"Model output {oh}x{ow} is smaller than the label {th}x{tw} -- "
-            "PatchDataset's context margin is too small for this patch_size "
-            "(see align_output_to_target's docstring)."
-        )
-    top, left = (oh - th) // 2, (ow - tw) // 2
-    return output[..., top:top + th, left:left + tw]
 
 
 class FocalLoss(nn.Module):

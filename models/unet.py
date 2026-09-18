@@ -22,6 +22,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
+import torch
 import torch.nn as nn
 from PIL import Image
 
@@ -144,6 +145,29 @@ def build_conv_out(n_classes, head=HEAD_GROUPNORM):
     raise ValueError(f"head must be one of {VALID_HEADS}, got {head!r}")
 
 
+def head_from_state_dict(state_dict: dict) -> str:
+    """Infer which `conv_out` head a bare state_dict was saved from.
+
+    Checkpoints in the multi/ pipeline are bare state_dicts (`best.pt`/`last.pt`,
+    and every shipped RootPainter `.pkl`) with no metadata recording the
+    architecture, so the keys themselves are the only evidence available --
+    and they are unambiguous: the groupnorm head's GroupNorm carries affine
+    parameters at `conv_out.2.{weight,bias}`, which the plain head simply
+    does not have. Inferring from the keys means every already-trained
+    checkpoint keeps loading with no format change and no caller has to
+    remember which head a given file was trained with.
+
+    Tolerates the 'module.' prefix DataParallel-saved checkpoints carry (see
+    multi/src/model.py's `_strip_module_prefix`), so it can be called before
+    stripping.
+    """
+    for key in state_dict:
+        name = key[len("module."):] if key.startswith("module.") else key
+        if name.startswith("conv_out.2."):
+            return HEAD_GROUPNORM
+    return HEAD_PLAIN
+
+
 class UNetGNRes(nn.Module):
     def __init__(self, im_channels=3, n_classes=2, head=HEAD_GROUPNORM):
         super().__init__()
@@ -183,6 +207,44 @@ class UNetGNRes(nn.Module):
         out = self.up4(out, out1)
         out = self.conv_out(out)
         return out
+
+
+def align_output_to_target(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Center-crop a model's spatial output down to `target`'s spatial size,
+    if they differ.
+
+    UNetGNRes's output is always a multiple of 16 (four MaxPool2d(2) stages
+    -- see above), so it is only ever exactly `input - 2*MARGIN` when `input`
+    is itself in get_valid_patch_sizes()'s family (input % 16 == 12, same
+    residue as the historical IN_SIZE=572). PatchDataset feeds the model
+    `patch_size + 2*MARGIN` (see multi/src/data_loader.py), which shifts
+    that residue, so for every patch_size in that family the model's real
+    output comes back exactly 4px larger (2px/side) than `patch_size` -- a
+    constant, deterministic remainder of the architecture's granularity, not
+    a sizing bug in the dataset. Crop that remainder off the model's own
+    freshly computed output here, right before the loss (the original crash
+    site, multi/train_unet_multiclass.py:65-66 -> this function) -- this
+    never touches or discards any of the label's own hand/pseudo-labelled
+    pixels.
+
+    Raises if `output` is smaller than `target` in either spatial dimension:
+    that would mean PatchDataset's margin was too small for this patch_size,
+    which should never happen with MARGIN imported from
+    models/UNetInference.py, but must fail loudly rather than silently
+    misalign predictions against labels if it ever does.
+    """
+    oh, ow = output.shape[-2:]
+    th, tw = target.shape[-2:]
+    if (oh, ow) == (th, tw):
+        return output
+    if oh < th or ow < tw:
+        raise RuntimeError(
+            f"Model output {oh}x{ow} is smaller than the label {th}x{tw} -- "
+            "PatchDataset's context margin is too small for this patch_size "
+            "(see align_output_to_target's docstring)."
+        )
+    top, left = (oh - th) // 2, (ow - tw) // 2
+    return output[..., top:top + th, left:left + tw]
 
 
 if __name__ == '__main__':

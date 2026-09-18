@@ -13,29 +13,12 @@ from .config import ensure_repo_root_importable
 
 ensure_repo_root_importable()
 
-from models.unet import HEAD_GROUPNORM, HEAD_PLAIN, UNetGNRes  # noqa: E402  (path set up above)
-
-
-def head_from_state_dict(state_dict: dict) -> str:
-    """Infer which `conv_out` head a bare state_dict was saved from.
-
-    Checkpoints in this pipeline are bare state_dicts (`best.pt`/`last.pt`,
-    and every shipped RootPainter `.pkl`) with no metadata recording the
-    architecture, so the keys themselves are the only evidence available --
-    and they are unambiguous: the groupnorm head's GroupNorm carries affine
-    parameters at `conv_out.2.{weight,bias}`, which the plain head simply
-    does not have. Inferring from the keys means every already-trained
-    checkpoint keeps loading with no format change and no caller has to
-    remember which head a given file was trained with.
-
-    Tolerates the 'module.' prefix DataParallel-saved checkpoints carry (see
-    `_strip_module_prefix`), so it can be called before stripping.
-    """
-    for key in state_dict:
-        name = key[len("module."):] if key.startswith("module.") else key
-        if name.startswith("conv_out.2."):
-            return HEAD_GROUPNORM
-    return HEAD_PLAIN
+from models.unet import (  # noqa: E402  (path set up above)
+    HEAD_GROUPNORM,
+    HEAD_PLAIN,
+    UNetGNRes,
+    head_from_state_dict,  # noqa: F401  (moved to models/unet.py; re-exported for existing callers)
+)
 
 
 def _strip_module_prefix(state_dict: dict) -> dict:

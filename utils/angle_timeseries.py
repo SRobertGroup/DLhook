@@ -102,7 +102,7 @@ BRANCH_START_ANCHOR_WEIGHT = 0.1
 # need a value above 190 -- while 220 is the tightest ceiling that leaves the
 # Camera_2 run with no out-of-band frame at all.
 MIN_BIO_ANGLE = 0.0
-MAX_BIO_ANGLE = 250.0
+MAX_BIO_ANGLE = 220.0
 
 HAMPEL_WINDOW = 3
 HAMPEL_N_SIGMAS = 3.0

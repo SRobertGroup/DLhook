@@ -41,11 +41,15 @@ re-exports this module unchanged so existing imports keep working.
 """
 from __future__ import annotations
 
+import os
+
+import cv2
 import numpy as np
 import torch
 from torch.nn.functional import softmax
 
 from models.UNetInference import (
+    IMAGE_CHUNK,
     IN_SIZE,
     MARGIN,
     OUT_SIZE,
@@ -211,3 +215,42 @@ class MulticlassInference:
             else:
                 results.append(np.argmax(cropped, axis=0).astype(np.uint8))
         return results
+
+    def predict_files_labelmaps(self, image_paths):
+        """Multiclass counterpart to `UNetInference.predict_files`
+        (models/UNetInference.py:222) -- same contract, but returns label
+        maps instead of a single-label binary mask, since one checkpoint
+        here stands in for all of BinaryBackend's per-label models at once.
+
+        Returns {basename: uint8 (H, W) label map, values 0..num_classes-1}
+        -- no disk writes; the caller (MulticlassBackend.predict_into)
+        decides how each class value becomes a stored mask.
+
+        Images are read and chunked exactly like predict_files: IMAGE_CHUNK
+        images decoded at a time via cv2.imread to bound host memory, an
+        unreadable path prints the identical `[WARNING] Could not load: ...`
+        line and is skipped (and so is simply absent from the returned
+        dict), and the per-image argmax stitching itself is delegated to
+        `segment_many_argmax` rather than reimplemented here.
+        """
+        label_maps = {}
+
+        for start in range(0, len(image_paths), IMAGE_CHUNK):
+            chunk_paths = image_paths[start:start + IMAGE_CHUNK]
+            valid_paths, images = [], []
+            for img_path in chunk_paths:
+                image = cv2.imread(img_path)
+                if image is None:
+                    print(f"[WARNING] Could not load: {img_path}")
+                    continue
+                valid_paths.append(img_path)
+                images.append(image)
+
+            if not images:
+                continue
+
+            label_map_batch = self.segment_many_argmax(images)
+            for img_path, label_map in zip(valid_paths, label_map_batch):
+                label_maps[os.path.basename(img_path)] = label_map
+
+        return label_maps

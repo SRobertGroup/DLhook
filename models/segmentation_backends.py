@@ -12,16 +12,19 @@ copies.
 
 Both GUI call sites now route here through `Gui._segment_paths`
 (seedling_measurment.py), so this module is the only place a weight file is
-named. Adding the multiclass backend, and flipping DEFAULT_BACKEND to it,
-are LATER separately-gated steps -- until then this resolves to
-BinaryBackend and runtime behaviour is exactly what it was before the
-routing change.
+named. `MulticlassBackend` (one 4-class checkpoint standing in for all three
+binary models) is also implemented here, but only reachable by explicitly
+setting DLHOOK_SEG_BACKEND=multiclass -- flipping DEFAULT_BACKEND to it is a
+later, separately-gated step. Until then this resolves to BinaryBackend and
+runtime behaviour is exactly what it was before the routing change.
 """
 from __future__ import annotations
 
 import os
 
-from models.UNetInference import get_predictor
+import numpy as np
+
+from models.UNetInference import MARGIN, get_predictor
 
 # DLHOOK_SEG_BACKEND env var name, and the backend names it (and get_backend)
 # accept. Keep DEFAULT_BACKEND "binary" until the multiclass backend is
@@ -30,6 +33,17 @@ from models.UNetInference import get_predictor
 ENV_VAR = "DLHOOK_SEG_BACKEND"
 DEFAULT_BACKEND = "binary"
 VALID_BACKENDS = ("binary", "multiclass")
+
+# Default 4-class checkpoint MulticlassBackend loads when the caller does not
+# name one explicitly. A groupnorm-head UNetGNRes trained at
+# data.patch_size: 252 (see MulticlassBackend's docstring for why that
+# geometry, not the GUI's default 572, is what this checkpoint needs).
+DEFAULT_MULTICLASS_CHECKPOINT = "weights/multiclass/dlhook_4class_v1.pt"
+
+# Class index -> mask store label. Class 0 (background) is intentionally
+# absent: MaskStore only ever holds foreground labels, and nothing downstream
+# reads a "background" label.
+_CLASS_TO_LABEL = {1: "1", 2: "2", 3: "4"}
 
 
 def resolve_backend_name() -> str:
@@ -92,17 +106,93 @@ class BinaryBackend:
 
 
 class MulticlassBackend:
-    """Placeholder -- NOT implemented in this step. A later, separately-gated
-    step adds this: one 4-class checkpoint whose argmax output populates the
-    same three labels ("1"/"2"/"4") that BinaryBackend gets from three
-    separate models, after which DEFAULT_BACKEND may be flipped to
-    "multiclass". Do not implement its body here."""
+    """One 4-class checkpoint whose argmax output populates the same three
+    labels ("1"/"2"/"4") that BinaryBackend gets from three separate models.
+    DEFAULT_BACKEND stays "binary" until a later, separately-gated step
+    flips it -- this backend is reachable only via
+    DLHOOK_SEG_BACKEND=multiclass until then.
 
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            "MulticlassBackend is not implemented yet -- DEFAULT_BACKEND stays "
-            "'binary' until a later step adds it."
-        )
+    Geometry is pinned to the checkpoint's own training patch size, NOT the
+    GUI's default 572/560/6 (UNetInference.IN_SIZE/OUT_SIZE/MARGIN): the
+    checkpoint was trained at training_config.yaml's `data.patch_size: 252`,
+    chosen because these crops are narrow (median 74x246px). Run at 572, the
+    default geometry reflect-pads ~94% of a typical crop with synthetic
+    context that patch_size=252 avoids -- previously producing meaningless
+    output. So out_size is 252, in_size is 252 + 2*MARGIN (MARGIN imported
+    from models.UNetInference, same fixed context margin UNetInference
+    itself uses, just not its IN_SIZE/OUT_SIZE), and margin is MARGIN.
+
+    Every constructor arg may be None ("use the default"), matching how
+    get_backend already calls this class -- resolved here rather than via
+    mutable default arguments so the resolved values are also what's cached
+    into get_backend's _BACKEND_CACHE key.
+    """
+
+    def __init__(self, checkpoint=None, *, in_size=None, out_size=None, num_classes=None):
+        self.checkpoint = checkpoint or DEFAULT_MULTICLASS_CHECKPOINT
+        self.out_size = out_size if out_size is not None else 252
+        self.in_size = in_size if in_size is not None else self.out_size + 2 * MARGIN
+        self.margin = MARGIN
+        self.num_classes = num_classes if num_classes is not None else 4
+        # Constructed lazily, on first predict_into call -- see that
+        # method's docstring for why. get_backend() must be free to hand
+        # back a MulticlassBackend without paying for a checkpoint load.
+        self._predictor = None
+
+    def _get_predictor(self):
+        """Load (and cache on self) the MulticlassInference for this
+        backend's checkpoint/geometry, only on first use. Deliberately not
+        done in __init__: get_backend() is called from Gui._segment_paths
+        just to resolve which backend is in play, and must not load a
+        multi-megabyte checkpoint onto the GPU merely because a backend
+        object was requested rather than actually run."""
+        if self._predictor is None:
+            # Imported here, not at module scope, so importing
+            # segmentation_backends never imports torch/MulticlassInference
+            # unless the multiclass backend is actually used.
+            from models.multiclass_inference import MulticlassInference
+
+            self._predictor = MulticlassInference(
+                self.checkpoint,
+                num_classes=self.num_classes,
+                in_size=self.in_size,
+                out_size=self.out_size,
+                margin=self.margin,
+            )
+        return self._predictor
+
+    def predict_into(self, mask_store, image_paths):
+        """Segment `image_paths` with the one 4-class checkpoint and store
+        the result into `mask_store` under the same three labels
+        BinaryBackend uses.
+
+        Why binary-split rather than storing the raw 0..3 label map
+        directly: MaskStore keys on (file_name, label) and MaskStore.dump()
+        applies cv2.bitwise_not() to whatever it holds, on the assumption
+        that a stored mask is binary (0/255) -- see MaskStore's own
+        docstring and models/UNetInference.py's _to_binary_mask. A raw
+        label map handed to dump() unmodified would invert to 255/254/253/
+        252 instead of a sensible mask, and every downstream MaskStore.get()
+        call site would need to know to un-argmax it first. Splitting each
+        label map into three independent binary masks here -- at the one
+        point where this backend's output enters the shared store -- keeps
+        every consumer (MaskStore, the GUI, export) exactly as it already
+        is for BinaryBackend's masks.
+
+        Class 0 (background) is never split out or stored -- nothing reads
+        a "background" label. Class 3 maps to label "4" (not "3"): "4" is
+        the GUI's radicle/germination label; label "3" exists on disk for
+        legacy reasons but is deliberately never populated (see CLAUDE.md).
+        """
+        predictor = self._get_predictor()
+        label_maps = predictor.predict_files_labelmaps(image_paths)
+
+        for class_index, label in _CLASS_TO_LABEL.items():
+            masks_by_filename = {
+                file_name: (label_map == class_index).astype(np.uint8) * 255
+                for file_name, label_map in label_maps.items()
+            }
+            mask_store.put_raw_bulk(masks_by_filename, label)
 
 
 # Process-wide cache of backend instances. Deliberately its OWN cache, not a
@@ -122,10 +212,11 @@ def get_backend(name=None, *, checkpoint=None, in_size=None, out_size=None, num_
     `resolve_backend_name()`), constructing it only on first request for
     this exact `(name, checkpoint, in_size, out_size, num_classes)` key.
     `checkpoint`/`in_size`/`out_size`/`num_classes` are unused by
-    BinaryBackend today (it has no checkpoint or configurable geometry) but
-    are accepted and folded into the cache key regardless, so the same call
-    signature already works for the future MulticlassBackend without another
-    cache-invalidation bug."""
+    BinaryBackend (it has no checkpoint or configurable geometry) but are
+    accepted and folded into the cache key regardless, so the identical call
+    signature also serves MulticlassBackend, whose checkpoint/geometry
+    default to None meaning "use MulticlassBackend's own defaults" -- see its
+    __init__."""
     if name is None:
         name = resolve_backend_name()
     elif name not in VALID_BACKENDS:

@@ -49,19 +49,24 @@ class ZoomableImageCanvas(tk.Canvas):
         # magnified into blobs by the zoom upscale.
         self._angle_markers = ([], None)
 
+        # Generic image-space overlay (points / lines / arrows), see set_overlay.
+        self._overlay = []
+
         self.bind("<MouseWheel>", self._on_mousewheel)  # Windows/macOS
         self.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, ZOOM_STEP))  # Linux scroll up
         self.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / ZOOM_STEP))  # Linux scroll down
 
-    def set_image(self, image):
+    def set_image(self, image, reset_view=False):
         """image: HxWx3 BGR numpy array, in the same pixel space as any
         overlay/mask the caller wants to paint or map coordinates against.
 
         Zoom/center are only initialized on the very first image, then left
         alone on every later call -- so navigating between a seedling's
         frames (all the same size) keeps whatever region the user zoomed
-        into, instead of resetting to fit-to-window on every frame change."""
-        is_first_image = self._image is None
+        into, instead of resetting to fit-to-window on every frame change.
+        reset_view=True forces a fresh fit-to-window, for a caller switching
+        to an image of a different size."""
+        is_first_image = self._image is None or reset_view
         h, w = image.shape[:2]
         self._image = image
 
@@ -141,6 +146,41 @@ class ZoomableImageCanvas(tk.Canvas):
         for cx, cy in canvas_points:
             self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color,
                               outline=color, tags="angle_markers")
+
+    def set_overlay(self, shapes):
+        """Image-space annotation overlay, drawn as fixed-screen-size canvas
+        items (crisp at any zoom, like the angle markers). `shapes` is a list
+        of dicts:
+            {"kind": "point", "xy": (x, y), "color": c, "label": "J"}
+            {"kind": "line", "from": (x, y), "to": (x, y), "color": c,
+             "arrow": bool, "dash": bool}"""
+        self._overlay = list(shapes)
+        self._draw_overlay()
+
+    def _draw_overlay(self):
+        self.delete("overlay")
+        if not self._overlay or self._image is None:
+            return
+        x1, y1, _, _ = self._visible_bounds()
+
+        def to_canvas(p):
+            return (p[0] - x1) * self.zoom, (p[1] - y1) * self.zoom
+
+        for shape in self._overlay:
+            color = shape.get("color", "#ff3b30")
+            if shape["kind"] == "line":
+                (ax, ay), (bx, by) = to_canvas(shape["from"]), to_canvas(shape["to"])
+                self.create_line(ax, ay, bx, by, fill=color, width=ANGLE_MARKER_WIDTH_PX,
+                                 arrow=tk.LAST if shape.get("arrow") else None,
+                                 arrowshape=(10, 12, 5), dash=(4, 3) if shape.get("dash") else None,
+                                 tags="overlay")
+            elif shape["kind"] == "point":
+                cx, cy = to_canvas(shape["xy"])
+                r = ANGLE_MARKER_RADIUS_PX + 1
+                self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline="white", tags="overlay")
+                if shape.get("label"):
+                    self.create_text(cx + r + 3, cy - r - 3, text=shape["label"], anchor=tk.SW,
+                                     fill=color, font=("Helvetica", 10, "bold"), tags="overlay")
 
     def canvas_to_image(self, canvas_x, canvas_y):
         """Maps a canvas pixel coordinate to the image pixel coordinate
@@ -228,3 +268,4 @@ class ZoomableImageCanvas(tk.Canvas):
         self.create_image(offset_x, offset_y, image=self._photo, anchor=tk.NW)
         self._draw_brush_preview()
         self._draw_angle_markers()
+        self._draw_overlay()

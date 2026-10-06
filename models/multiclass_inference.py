@@ -59,7 +59,8 @@ from models.UNetInference import (
     _pad_to_min,
 )
 from models.normalization import zscore_normalize
-from models.unet import UNetGNRes, align_output_to_target, head_from_state_dict
+from models.unet import UNetGNRes, align_output_to_target, has_landmark_head, head_from_state_dict, landmark_hidden_from_state_dict, landmark_root_from_state_dict
+from utils.landmark_readout import READOUT_RADIUS, readout_from_fields
 
 CPU_BATCH_SIZE = 4
 
@@ -109,7 +110,14 @@ class MulticlassInference:
         # and a plain-head checkpoint with the identical command line. See
         # models/unet.py:head_from_state_dict.
         self.head = head_from_state_dict(state_dict)
-        self.model = UNetGNRes(n_classes=num_classes, head=self.head)
+        # A checkpoint trained with the optional landmark head carries conv_kp /
+        # cls_overhook keys; build the matching architecture so the strict load
+        # works. segment_many_argmax and the rest of the segmentation path
+        # ignore the extra head entirely (UNetGNRes.forward is unchanged).
+        self.has_landmarks = has_landmark_head(state_dict)
+        self.model = UNetGNRes(n_classes=num_classes, head=self.head, landmark_head=self.has_landmarks,
+                               landmark_hidden=landmark_hidden_from_state_dict(state_dict),
+                               landmark_root=landmark_root_from_state_dict(state_dict))
         try:
             self.model.load_state_dict(state_dict)
         except RuntimeError:
@@ -123,6 +131,29 @@ class MulticlassInference:
         self.model.to(self.device)
         self.model.eval()
         self.batch_size = batch_size or (CPU_BATCH_SIZE if self.device.type != "cuda" else CPU_BATCH_SIZE)
+
+    @classmethod
+    def from_model(cls, model, num_classes: int = 4, batch_size: int | None = None,
+                   device: torch.device | None = None,
+                   in_size: int = IN_SIZE, out_size: int = OUT_SIZE, margin: int = MARGIN):
+        """Wrap a live UNetGNRes (e.g. the model being trained) instead of loading a
+        checkpoint, so the training loop can validate through exactly the tiling and
+        readout used at inference. The caller owns the model's train/eval mode."""
+        self = cls.__new__(cls)
+        self.device = device or next(model.parameters()).device
+        self.num_classes = num_classes
+        self.in_size, self.out_size, self.margin = in_size, out_size, margin
+        self._out_shape_ref = torch.empty(out_size, out_size)
+        self.model = model
+        core = self._core()
+        self.head = core.head
+        self.has_landmarks = bool(getattr(core, "landmark_head", False))
+        self.batch_size = batch_size or CPU_BATCH_SIZE
+        return self
+
+    def _core(self):
+        """The underlying UNetGNRes, whether or not DataParallel wraps it."""
+        return self.model.module if isinstance(self.model, torch.nn.DataParallel) else self.model
 
     def _plan_tiles(self, image):
         base_image, base_pad = _pad_to_min(image, self.in_size)
@@ -254,3 +285,108 @@ class MulticlassInference:
                 label_maps[os.path.basename(img_path)] = label_map
 
         return label_maps
+
+    # --- landmark head -------------------------------------------------------
+
+    def _run_batch_landmarks(self, tiles):
+        """Per tile: (junction probability map, 4 direction-field maps, overhook
+        probability, extra), the maps cropped to out_size like the segmentation
+        output; extra is None, or for a collar/root head {"collar_hm", "root_vec"}.
+        Same per-tile z-score as _run_batch."""
+        batch = np.stack([zscore_normalize(t) for t in tiles]).transpose(0, 3, 1, 2)
+        tensor = torch.from_numpy(batch).to(self.device)
+        with torch.inference_mode():
+            _, kp, overhook = self._core().forward_with_landmarks(tensor)
+            kp = align_output_to_target(kp, self._out_shape_ref).float()
+            hm = torch.sigmoid(kp[:, 0]).cpu().numpy()
+            vec = kp[:, 1:5].cpu().numpy()
+            overhook = torch.sigmoid(overhook.float()).cpu().numpy()
+            extra = None
+            if kp.shape[1] >= 8:
+                collar = torch.sigmoid(kp[:, 5]).cpu().numpy()
+                root = kp[:, 6:8].cpu().numpy()
+                extra = [{"collar_hm": collar[i], "root_vec": root[i]} for i in range(hm.shape[0])]
+        return [(hm[i], vec[i], float(overhook[i]), extra[i] if extra else None) for i in range(hm.shape[0])]
+
+    def predict_landmarks(self, images, readout_radius: float = READOUT_RADIUS):
+        """Hook angle from the landmark head for a list of native BGR crops.
+
+        Returns one entry per image: the dict from
+        utils.landmark_readout.readout_from_fields (junction, theta, bio,
+        overhook, directions, peak), or None when no junction is found."""
+        return [readout_from_fields(hm, vec, prob, radius=readout_radius, **(extra or {}))
+                for hm, vec, prob, extra in self.predict_landmark_fields(images)]
+
+    def predict_landmark_fields(self, images):
+        """Raw landmark maps for a list of native BGR crops: one (hm (H, W),
+        vec (4, H, W), overhook_prob, extra) per image, at the crop's own size (extra is
+        None, or {"collar_hm" (H, W), "root_vec" (2, H, W)} for a collar/root head), so a
+        caller can read the angle at a junction other than the heatmap peak
+        (e.g. one tracked across frames).
+        Tiles are stitched like the segmentation output (overwrite). The
+        overhook probability is image-level, so it is taken from the tile with
+        the strongest junction peak -- the tile that actually contains the hook.
+        Requires a checkpoint trained with the landmark head."""
+        if not self.has_landmarks:
+            raise RuntimeError("this checkpoint has no landmark head (no conv_kp / cls_overhook keys)")
+
+        plans, hm_out, vec_out, best = [], [], [], []
+        collar_out, root_out = [], []
+        work = []
+        for idx, image in enumerate(images):
+            orig_h, orig_w = image.shape[:2]
+            padded, base_pad, base_h, base_w, tile_coords = self._plan_tiles(image)
+            hm_out.append(np.zeros((base_h, base_w), dtype=np.float32))
+            vec_out.append(np.zeros((4, base_h, base_w), dtype=np.float32))
+            collar_out.append(np.zeros((base_h, base_w), dtype=np.float32))
+            root_out.append(np.zeros((2, base_h, base_w), dtype=np.float32))
+            best.append((-1.0, 0.0))                       # (strongest tile peak, its overhook prob)
+            plans.append((orig_h, orig_w, base_pad))
+            for (x, y) in tile_coords:
+                work.append((idx, x, y, padded[y:y + self.in_size, x:x + self.in_size]))
+
+        for start in range(0, len(work), self.batch_size):
+            chunk = work[start:start + self.batch_size]
+            for (idx, x, y, _), (hm, vec, overhook, extra) in zip(chunk, self._run_batch_landmarks([c[3] for c in chunk])):
+                hm_out[idx][y:y + self.out_size, x:x + self.out_size] = hm
+                vec_out[idx][:, y:y + self.out_size, x:x + self.out_size] = vec
+                if extra is not None:
+                    collar_out[idx][y:y + self.out_size, x:x + self.out_size] = extra["collar_hm"]
+                    root_out[idx][:, y:y + self.out_size, x:x + self.out_size] = extra["root_vec"]
+                if float(hm.max()) > best[idx][0]:
+                    best[idx] = (float(hm.max()), overhook)
+
+        results = []
+        for idx, (orig_h, orig_w, base_pad) in enumerate(plans):
+            hm = _crop_from_pad(hm_out[idx], base_pad)
+            vec = np.stack([_crop_from_pad(vec_out[idx][c], base_pad) for c in range(4)])
+            assert hm.shape == (orig_h, orig_w)
+            extra = None
+            if self._core().landmark_root:
+                extra = {"collar_hm": _crop_from_pad(collar_out[idx], base_pad),
+                         "root_vec": np.stack([_crop_from_pad(root_out[idx][c], base_pad) for c in range(2)])}
+            results.append((hm, vec, best[idx][1], extra))
+        return results
+
+    def predict_files_landmarks(self, image_paths, fields=False, readout_radius: float = READOUT_RADIUS):
+        """{basename: readout dict or None} for image paths, chunked like
+        predict_files_labelmaps (unreadable paths are skipped with the same
+        warning and absent from the result). With fields=True the value is the
+        raw (hm, vec, overhook_prob, extra) from predict_landmark_fields instead."""
+        out = {}
+        for start in range(0, len(image_paths), IMAGE_CHUNK):
+            paths, images = [], []
+            for img_path in image_paths[start:start + IMAGE_CHUNK]:
+                image = cv2.imread(img_path)
+                if image is None:
+                    print(f"[WARNING] Could not load: {img_path}")
+                    continue
+                paths.append(img_path)
+                images.append(image)
+            if images:
+                results = self.predict_landmark_fields(images)
+                for img_path, (hm, vec, prob, extra) in zip(paths, results):
+                    out[os.path.basename(img_path)] = (
+                        (hm, vec, prob, extra) if fields
+                        else readout_from_fields(hm, vec, prob, radius=readout_radius, **(extra or {})))
+        return out

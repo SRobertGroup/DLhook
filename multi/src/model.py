@@ -30,7 +30,7 @@ def _strip_module_prefix(state_dict: dict) -> dict:
     }
 
 
-def warm_start_from_checkpoint(model: UNetGNRes, checkpoint_path) -> list:
+def warm_start_from_checkpoint(model: UNetGNRes, checkpoint_path, keep_head: bool = False) -> list:
     """Load every matching layer EXCEPT conv_out (the classification head,
     whose shape is n_classes-dependent) from a binary RootPainter checkpoint
     -- e.g. so 4-class training starts from the cotyledon encoder instead of
@@ -39,7 +39,13 @@ def warm_start_from_checkpoint(model: UNetGNRes, checkpoint_path) -> list:
     The `conv_out` skip is by key prefix, so it holds for either head: a
     plain-head model has no `conv_out.2.*` to receive the checkpoint's
     GroupNorm affine parameters, and those keys are skipped by name before
-    the shape check ever runs."""
+    the shape check ever runs.
+
+    keep_head=True loads conv_out too (when its shape matches), for
+    fine-tuning a model that already has a trained n_classes-shaped head -- e.g.
+    adding the landmark head to the shipped 4-class checkpoint without
+    discarding its segmentation. Keys the checkpoint does not have (conv_kp,
+    cls_overhook) simply keep their fresh initialisation."""
     checkpoint_path = Path(checkpoint_path)
     state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     state_dict = _strip_module_prefix(state_dict)
@@ -47,7 +53,7 @@ def warm_start_from_checkpoint(model: UNetGNRes, checkpoint_path) -> list:
     own_state = model.state_dict()
     loaded = []
     for key, value in state_dict.items():
-        if key.startswith("conv_out"):
+        if key.startswith("conv_out") and not keep_head:
             continue
         if key not in own_state or own_state[key].shape != value.shape:
             continue
@@ -71,10 +77,15 @@ def build_model(cfg: dict) -> UNetGNRes:
     num_classes = cfg.get("num_classes", 2)
     im_channels = cfg.get("in_channels", 3)
     head = cfg.get("head") or HEAD_GROUPNORM
-    model = UNetGNRes(im_channels=im_channels, n_classes=num_classes, head=head)
+    landmark_head = bool(cfg.get("landmark_head", False))
+    model = UNetGNRes(im_channels=im_channels, n_classes=num_classes, head=head,
+                      landmark_head=landmark_head,
+                      landmark_hidden=int(cfg.get("landmark_hidden", 0)),
+                      landmark_root=bool(cfg.get("landmark_root", False)))
 
     warm_start_from = cfg.get("warm_start_from")
     if warm_start_from:
-        warm_start_from_checkpoint(model, warm_start_from)
+        warm_start_from_checkpoint(model, warm_start_from,
+                                   keep_head=bool(cfg.get("warm_start_keep_head", False)))
 
     return model

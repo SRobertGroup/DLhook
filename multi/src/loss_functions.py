@@ -71,3 +71,76 @@ def build_loss(cfg: dict) -> nn.Module:
             ignore_index=ignore_index,
         )
     raise ValueError(f"Unknown loss.type: {loss_type!r} (expected 'cross_entropy' or 'focal')")
+
+
+DEFAULT_LANDMARK_WEIGHTS = {"hm": 1.0, "paf": 1.0, "overhook": 0.3, "collar": 1.0, "root": 1.0, "overhook_pos": 1.0}
+
+
+def landmark_loss(kp_logits: torch.Tensor, overhook_logit: torch.Tensor, targets: dict,
+                  weights: dict | None = None):
+    """Loss for the optional landmark head (models/unet.py: forward_with_landmarks),
+    already cropped to the label grid.
+
+    kp_logits (N,5,H,W): channel 0 = junction logit, 1..4 = hypocotyl/cotyledon
+    direction fields. overhook_logit (N,). `targets` holds hm (N,H,W), paf
+    (N,4,H,W), paf_valid (N,2,H,W), overhook (N,) and has_kp (N,).
+
+    Every term is averaged over the samples with has_kp == 1 only -- a patch
+    with no annotation, or one that does not contain the junction, contributes
+    nothing here (its segmentation loss is separate). With no such sample the
+    result is a zero that still carries a graph, so backward() is harmless.
+
+    * junction: sigmoid(logit) against the Gaussian target, squared error
+      weighted 1 + 20*hm so the peak is not drowned by background, normalised
+      by the target's own mass (sum hm) rather than by pixel count, which would
+      make the term vanishingly small on a 252x252 patch;
+    * directions: L1 against the unit vector, only where paf_valid (the ray);
+    * overhook: binary cross-entropy on the image-level flag; weights["overhook_pos"]
+      (> 1) up-weights the positive class, which is the minority (about a quarter of
+      the annotated frames) and otherwise collapses to "never overhooked";
+    * with an 8-channel head (kp_logits channels 5..7) and targets collar_hm /
+      root_vec / root_valid / has_collar: the same heatmap loss on the collar and
+      the same masked L1 on the root direction, each averaged over the samples that
+      have a collar annotation (has_kp and has_collar).
+
+    Returns (total, parts) with `parts` a dict of detached floats."""
+    w = {**DEFAULT_LANDMARK_WEIGHTS, **(weights or {})}
+    has = targets["has_kp"].to(kp_logits.dtype)
+    n_has = has.sum()
+    if float(n_has) == 0.0:
+        zero = kp_logits.sum() * 0.0 + overhook_logit.sum() * 0.0
+        return zero, {"hm": 0.0, "paf": 0.0, "overhook": 0.0}
+
+    hm_t = targets["hm"].to(kp_logits.dtype)
+    prob = torch.sigmoid(kp_logits[:, 0].float())
+    sq = ((1.0 + 20.0 * hm_t.float()) * (prob - hm_t.float()) ** 2).sum(dim=(1, 2))
+    hm_loss = ((sq / hm_t.float().sum(dim=(1, 2)).clamp(min=1e-6)) * has.float()).sum() / n_has
+
+    valid = targets["paf_valid"].to(kp_logits.dtype).repeat_interleave(2, dim=1)
+    l1 = ((kp_logits[:, 1:5].float() - targets["paf"].float()).abs() * valid.float()).sum(dim=(1, 2, 3))
+    paf_loss = ((l1 / valid.float().sum(dim=(1, 2, 3)).clamp(min=1.0)) * has.float()).sum() / n_has
+
+    bce = F.binary_cross_entropy_with_logits(
+        overhook_logit.float(), targets["overhook"].float(), reduction="none",
+        pos_weight=torch.tensor(float(w["overhook_pos"]), device=overhook_logit.device))
+    oh_loss = (bce * has.float()).sum() / n_has
+
+    total = w["hm"] * hm_loss + w["paf"] * paf_loss + w["overhook"] * oh_loss
+    parts = {"hm": float(hm_loss.detach()), "paf": float(paf_loss.detach()), "overhook": float(oh_loss.detach())}
+
+    if kp_logits.shape[1] >= 8 and "collar_hm" in targets:
+        has_c = (targets["has_collar"].to(kp_logits.dtype) * has).float()
+        n_c = has_c.sum()
+        if float(n_c) > 0.0:
+            c_t = targets["collar_hm"].float()
+            c_prob = torch.sigmoid(kp_logits[:, 5].float())
+            c_sq = ((1.0 + 20.0 * c_t) * (c_prob - c_t) ** 2).sum(dim=(1, 2))
+            collar_loss = ((c_sq / c_t.sum(dim=(1, 2)).clamp(min=1e-6)) * has_c).sum() / n_c
+            r_valid = targets["root_valid"].float().repeat_interleave(2, dim=1)
+            r_l1 = ((kp_logits[:, 6:8].float() - targets["root_vec"].float()).abs() * r_valid).sum(dim=(1, 2, 3))
+            root_loss = ((r_l1 / r_valid.sum(dim=(1, 2, 3)).clamp(min=1.0)) * has_c).sum() / n_c
+        else:
+            collar_loss = root_loss = kp_logits[:, 5:8].sum() * 0.0
+        total = total + w["collar"] * collar_loss + w["root"] * root_loss
+        parts.update(collar=float(collar_loss.detach()), root=float(root_loss.detach()))
+    return total, parts

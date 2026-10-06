@@ -2,7 +2,6 @@ import os
 import tkinter as tk
 import numpy as np
 import pandas as pd
-import shutil
 import atexit
 import sys
 
@@ -22,6 +21,10 @@ from utils.postprocmask import PostprocessMasks, point_num
 from utils.mask_store import MaskStore
 from utils.gui_thread_safety import ProgressReporter
 from utils.germination_detector import GerminationDetector
+from utils.crop_layout import (
+    clamp_to_image, clamp_to_neighbours, content_rect, find_overlapping_pairs,
+    resolve_overlaps, spatial_order,
+)
 from ui.analysis_window import SeedlingAnalysisWindow
 from ui.kinematics_window import KinematicsWindow
 
@@ -107,12 +110,19 @@ class Gui():
         self.capture_times={}
 
         # Per-seedling adjustable crop boxes (image coords), 1:1 with seedling_pairs,
-        # auto-derived from each pair's bounding box: {"cx","cy","half_w","half_h"}
+        # auto-derived from each pair's bounding box: {"cx","cy","half_w","half_h"}.
+        # Kept non-overlapping and in spatial (top-to-bottom, left-to-right)
+        # order by _relayout_crop_boxes, so list index == crop_id == label - 1.
         self.crop_boxes=[]
         self._pending_start=None
         self._box_canvas_items=[]
         self._point_canvas_items=[]
         self._active_handle=None
+        # Placement sequence number per box (parallel to crop_boxes), so undo
+        # removes the most recently placed seedling even after reordering.
+        self._crop_add_seq=[]
+        self._next_crop_seq=0
+        self._overlapping_crops=set()
 
         self.transformed_mid_points=[]
         self.crop_points_distributed=[]
@@ -262,7 +272,7 @@ class Gui():
         sep = Separator(self.sidebar_frame, orient=tk.HORIZONTAL)
         sep.grid(row=sidebar_row, column=0, sticky="ew", pady=10); sidebar_row += 1
 
-        self.debug_var=tk.IntVar(value=1)
+        self.debug_var=tk.IntVar(value=0)
         self.check_button_debug= tk.Checkbutton(self.sidebar_frame, text='Debug Mode', variable=self.debug_var)
         self.check_button_debug.grid(row=sidebar_row, column=0, sticky="w", pady=(0, 10)); sidebar_row += 1
 
@@ -345,12 +355,12 @@ class Gui():
 
         if self._pending_start is None:
             # First click of the pair: the seed-coat start point
-            oval = self.canvas.create_oval(x1 - r, y1 - r, x1 + r, y1 + r, stipple='', fill="#536791")
+            oval = self.canvas.create_oval(x1 - r, y1 - r, x1 + r, y1 + r, stipple='', fill="#536791", tags="crop")
             self._pending_start = {"image": (px, py), "oval": oval}
             return
 
         # Second click of the pair: the end point completes this seedling
-        end_oval = self.canvas.create_oval(x1 - r, y1 - r, x1 + r, y1 + r, stipple='', fill="#8a5eb8")
+        end_oval = self.canvas.create_oval(x1 - r, y1 - r, x1 + r, y1 + r, stipple='', fill="#8a5eb8", tags="crop")
         start_point = self._pending_start["image"]
         start_oval = self._pending_start["oval"]
         self._pending_start = None
@@ -376,18 +386,22 @@ class Gui():
         if not self.seedling_pairs:
             return
 
-        self.seedling_pairs.pop()
-        self.crop_boxes.pop()
-        self._refresh_transformed_mid_points()
+        # Boxes are kept in spatial order, so the last-placed one is found by
+        # its placement sequence number rather than by list position.
+        idx = self._crop_add_seq.index(max(self._crop_add_seq))
+        for name in self._parallel_crop_lists():
+            getattr(self, name).pop(idx)
 
-        start_oval, end_oval = self._point_canvas_items.pop()
+        start_oval, end_oval = self._point_canvas_items.pop(idx)
         self.canvas.delete(start_oval)
         self.canvas.delete(end_oval)
 
-        box_item = self._box_canvas_items.pop()
-        self.canvas.delete(box_item["rect"])
+        box_item = self._box_canvas_items.pop(idx)
+        self.canvas.delete(box_item["rect"], box_item["label_bg"], box_item["label"])
         for handle_id in box_item["handles"].values():
             self.canvas.delete(handle_id)
+
+        self._apply_crop_order(spatial_order(self.crop_boxes))
 
         if not self.crop_boxes:
             self.button_crop["state"] = tk.DISABLED
@@ -413,10 +427,49 @@ class Gui():
         }
 
     def _add_crop_box(self, start, end):
-        box = self._compute_crop_box(start, end)
+        box = clamp_to_image(self._compute_crop_box(start, end), self.width1, self.height1)
         self.crop_boxes.append(box)
+        self._crop_add_seq.append(self._next_crop_seq)
+        self._next_crop_seq += 1
         self._draw_crop_box(len(self.crop_boxes) - 1)
+        self._relayout_crop_boxes()
+
+    def _parallel_crop_lists(self):
+        """Names of the per-seedling lists that must stay index-aligned with
+        crop_boxes (canvas item lists are handled by their callers, which also
+        delete the items). selected_points_debug is only aligned until debug
+        mode overwrites it from file at analysis start."""
+        names = ["crop_boxes", "seedling_pairs", "_crop_add_seq"]
+        if len(self.selected_points_debug) == len(self.crop_boxes):
+            names.append("selected_points_debug")
+        return names
+
+    def _relayout_crop_boxes(self):
+        """Trim the boxes apart where they overlap, then renumber them in
+        spatial order. Only called while placing points -- i.e. before Start
+        Analysis -- so crop_ids never shift under stored frame results."""
+        contents = [content_rect(p["start"], p["end"]) for p in self.seedling_pairs]
+        self.crop_boxes = resolve_overlaps(self.crop_boxes, contents)
+        self._apply_crop_order(spatial_order(self.crop_boxes))
+
+    def _apply_crop_order(self, order):
+        """Reorder every per-seedling list by `order` (new index -> old index),
+        then redraw so each label shows its new crop_id + 1."""
+        for name in self._parallel_crop_lists() + ["_point_canvas_items", "_box_canvas_items"]:
+            items = getattr(self, name)
+            setattr(self, name, [items[k] for k in order])
+        self._overlapping_crops = {k for pair in find_overlapping_pairs(self.crop_boxes) for k in pair}
+        for idx in range(len(self.crop_boxes)):
+            self._redraw_crop_box(idx)
         self._refresh_transformed_mid_points()
+
+        if self._overlapping_crops:
+            ids = ", ".join(str(k + 1) for k in sorted(self._overlapping_crops))
+            self.progress_bar_label.configure(
+                text=f"Seedlings {ids} still overlap (their points cross) -- shown in red")
+        elif self.crop_boxes:
+            self.progress_bar_label.configure(
+                text=f"{len(self.crop_boxes)} seedling(s) -- numbered top-to-bottom, left-to-right")
 
     def _refresh_transformed_mid_points(self):
         self.transformed_mid_points = [(box["cx"], box["cy"]) for box in self.crop_boxes]
@@ -429,30 +482,43 @@ class Gui():
         return (cx - hw, cy - hh, cx + hw, cy + hh)
 
     def _draw_crop_box(self, idx):
-        box = self.crop_boxes[idx]
-        x1, y1, x2, y2 = self._crop_box_canvas_rect(box)
-        rect_id = self.canvas.create_rectangle(x1, y1, x2, y2, width=3, outline="#d78a5e")
-
-        handle_r = 5
-        corners = {"nw": (x1, y1), "ne": (x2, y1), "sw": (x1, y2), "se": (x2, y2)}
-        handles = {}
-        for name, (hx, hy) in corners.items():
-            handles[name] = self.canvas.create_rectangle(
-                hx - handle_r, hy - handle_r, hx + handle_r, hy + handle_r,
-                fill="#d78a5e", outline="black"
-            )
-        self._box_canvas_items.append({"rect": rect_id, "handles": handles})
+        # Items are created at the origin and positioned by _redraw_crop_box;
+        # all carry the "crop" tag so show_image can raise them above a
+        # freshly displayed frame.
+        rect_id = self.canvas.create_rectangle(0, 0, 0, 0, width=3, outline="#d78a5e", tags="crop")
+        handles = {
+            name: self.canvas.create_rectangle(0, 0, 0, 0, fill="#d78a5e", outline="black", tags="crop")
+            for name in ("nw", "ne", "sw", "se")
+        }
+        label_bg = self.canvas.create_rectangle(0, 0, 0, 0, fill="#d78a5e", outline="", tags="crop")
+        label = self.canvas.create_text(0, 0, text="", anchor=tk.NW, fill="white",
+                                        font=("Helvetica", 11, "bold"), tags="crop")
+        self._box_canvas_items.append({"rect": rect_id, "handles": handles,
+                                       "label_bg": label_bg, "label": label})
+        self._redraw_crop_box(idx)
 
     def _redraw_crop_box(self, idx):
         box = self.crop_boxes[idx]
         x1, y1, x2, y2 = self._crop_box_canvas_rect(box)
         item = self._box_canvas_items[idx]
+        colour = "#ff3b30" if idx in self._overlapping_crops else "#d78a5e"
         self.canvas.coords(item["rect"], x1, y1, x2, y2)
+        self.canvas.itemconfigure(item["rect"], outline=colour)
 
         handle_r = 5
         corners = {"nw": (x1, y1), "ne": (x2, y1), "sw": (x1, y2), "se": (x2, y2)}
         for name, (hx, hy) in corners.items():
             self.canvas.coords(item["handles"][name], hx - handle_r, hy - handle_r, hx + handle_r, hy + handle_r)
+            self.canvas.itemconfigure(item["handles"][name], fill=colour)
+
+        # Seedling ID (crop_id + 1, the CSV seedling_id) just inside the
+        # top-left corner, clear of the nw handle, on a filled tag for contrast.
+        self.canvas.itemconfigure(item["label"], text=str(idx + 1))
+        self.canvas.coords(item["label"], x1 + handle_r + 3, y1 + handle_r + 1)
+        lx1, ly1, lx2, ly2 = self.canvas.bbox(item["label"])
+        self.canvas.coords(item["label_bg"], lx1 - 2, ly1, lx2 + 2, ly2)
+        self.canvas.itemconfigure(item["label_bg"], fill=colour)
+        self.canvas.tag_raise(item["label"], item["label_bg"])
 
     def _find_handle_at(self, x, y):
         for idx, item in enumerate(self._box_canvas_items):
@@ -491,10 +557,17 @@ class Gui():
         half_w = max(abs(x2 - x1) / 2, self.min_box_half_size)
         half_h = max(abs(y2 - y1) / 2, self.min_box_half_size)
 
-        box["cx"] = round((x1 + x2) / 2)
-        box["cy"] = round((y1 + y2) / 2)
-        box["half_w"] = round(half_w)
-        box["half_h"] = round(half_h)
+        resized = {
+            "cx": round((x1 + x2) / 2),
+            "cy": round((y1 + y2) / 2),
+            "half_w": round(half_w),
+            "half_h": round(half_h),
+        }
+        # A resize stops at a neighbour's edge and at the image border; IDs
+        # are deliberately not renumbered mid-drag.
+        others = [b for k, b in enumerate(self.crop_boxes) if k != idx]
+        resized = clamp_to_neighbours(dict(box), resized, others)
+        box.update(clamp_to_image(resized, self.width1, self.height1))
 
         self._redraw_crop_box(idx)
         self._refresh_transformed_mid_points()
@@ -503,13 +576,6 @@ class Gui():
         self._active_handle = None
 
 
-    def restart_program(self):
-        shutil.rmtree(self.path, ignore_errors=True)
-        for file in os.listdir('model_data/images/'):
-            os.remove('model_data/images/')
-        python = sys.executable
-        os.execl(python, python, * sys.argv)
-        
     def canvas_to_image_coords(self, canvas_x, canvas_y):
         """Convert canvas coordinates (scaled) to actual image coordinates."""
         if not hasattr(self, 'width1') or not hasattr(self, 'height1'):
@@ -1430,6 +1496,8 @@ class Gui():
 
                 self.photo_n = ImageTk.PhotoImage(image=Image.fromarray(image_n))
                 self.image_on_canvas = self.canvas.create_image(0, 0, image=self.photo_n, anchor=tk.NW)
+                # Keep already-placed crop boxes and their ID labels above the new frame
+                self.canvas.tag_raise("crop")
                 self.root.mainloop()
 
 

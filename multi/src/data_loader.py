@@ -13,6 +13,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from .config import ensure_repo_root_importable
+from .landmarks import HM_SIGMA, PEAK_PRESENT, RAY_WIDTH, pad_targets_to_min, render_targets
 from .normalization import zscore_normalize
 from .patch_index import IGNORE_VALUE, pad_to_min
 
@@ -29,7 +30,15 @@ from models.UNetInference import MARGIN, _pad_reflect  # noqa: E402  (path set u
 class PatchDataset(Dataset):
     def __init__(self, csv_path, raw_dir, masks_dir, augment: bool = False,
                  augmentation_cfg: dict | None = None, seed: int | None = None,
-                 raw_ext: str = ".png", binarize_mask: bool = False):
+                 raw_ext: str = ".png", binarize_mask: bool = False,
+                 landmarks: dict | None = None, filenames=None, landmark_cfg: dict | None = None):
+        """`landmarks` ({crop file name: multi.src.landmarks.Landmark}) switches
+        on landmark supervision: __getitem__ then returns a third element, a
+        dict of target tensors (hm, paf, paf_valid, overhook, has_kp), rendered
+        on the label grid and put through exactly the same padding, crop, flip
+        and rotation as the mask. Crops without a landmark yield all-zero
+        targets with has_kp = 0. `filenames`, if given, keeps only the patch
+        rows of those crops. With landmarks=None nothing changes."""
         self.raw_dir = Path(raw_dir)
         self.masks_dir = Path(masks_dir)
         self.augment = augment
@@ -51,6 +60,14 @@ class PatchDataset(Dataset):
 
         with open(csv_path, "r", newline="", encoding="utf-8") as fh:
             self.rows = list(csv.DictReader(fh))
+        if filenames is not None:
+            keep = set(filenames)
+            self.rows = [r for r in self.rows if r["filename"] in keep]
+
+        self.landmarks = landmarks
+        lcfg = dict(landmark_cfg or {})
+        self.hm_sigma = float(lcfg.get("sigma", HM_SIGMA))
+        self.ray_width = float(lcfg.get("ray_width", RAY_WIDTH))
 
     def __len__(self):
         return len(self.rows)
@@ -95,10 +112,38 @@ class PatchDataset(Dataset):
         mask_patch = mask[y:y + size, x:x + size].copy()
         return raw_patch, mask_patch
 
-    def _augment(self, raw_patch: np.ndarray, mask_patch: np.ndarray):
+    def _load_targets(self, row):
+        """Landmark targets for one patch row, on the label grid (size x size)."""
+        size, x, y = int(row["patch_size"]), int(row["x"]), int(row["y"])
+        lm = self.landmarks.get(row["filename"])
+        if lm is None:
+            return {"hm": np.zeros((size, size), np.float32), "paf": np.zeros((4, size, size), np.float32),
+                    "paf_valid": np.zeros((2, size, size), np.float32), "overhook": 0.0,
+                    "collar_hm": np.zeros((size, size), np.float32),
+                    "root_vec": np.zeros((2, size, size), np.float32),
+                    "root_valid": np.zeros((1, size, size), np.float32)}
+        with Image.open(self.raw_dir / (Path(row["filename"]).stem + self.raw_ext)) as im:
+            w, h = im.size
+        t = render_targets(h, w, lm, sigma=self.hm_sigma, ray_width=self.ray_width)
+        out = {k: pad_targets_to_min(v, size)[..., y:y + size, x:x + size].copy() for k, v in t.items()}
+        out["overhook"] = float(lm.overhook)
+        return out
+
+    def _augment(self, raw_patch: np.ndarray, mask_patch: np.ndarray, kp: dict | None = None):
+        """With `kp` (the dict from _load_targets) given, the landmark targets
+        are flipped / rotated with the very same transform and a third value is
+        returned: a horizontal flip negates the x component of both direction
+        fields, a rotation rotates their vectors by the same matrix."""
         if self.horizontal_flip and self.rng.random() < 0.5:
             raw_patch = raw_patch[:, ::-1, :].copy()
             mask_patch = mask_patch[:, ::-1].copy()
+            if kp is not None:
+                kp = dict(kp, hm=kp["hm"][:, ::-1].copy(), paf=kp["paf"][:, :, ::-1].copy(),
+                          paf_valid=kp["paf_valid"][:, :, ::-1].copy(),
+                          collar_hm=kp["collar_hm"][:, ::-1].copy(), root_vec=kp["root_vec"][:, :, ::-1].copy(),
+                          root_valid=kp["root_valid"][:, :, ::-1].copy())
+                kp["paf"][[0, 2]] *= -1.0
+                kp["root_vec"][0] *= -1.0
 
         if self.rotation_degrees:
             angle = self.rng.uniform(-self.rotation_degrees, self.rotation_degrees)
@@ -115,6 +160,8 @@ class PatchDataset(Dataset):
                 mask_patch, mask_matrix, (mask_w, mask_h), flags=cv2.INTER_NEAREST,
                 borderMode=cv2.BORDER_CONSTANT, borderValue=IGNORE_VALUE,
             )
+            if kp is not None:
+                kp = self._rotate_targets(kp, mask_matrix, (mask_w, mask_h))
 
             raw_h, raw_w = raw_patch.shape[:2]
             raw_matrix = cv2.getRotationMatrix2D((raw_w / 2, raw_h / 2), angle, 1.0)
@@ -131,14 +178,51 @@ class PatchDataset(Dataset):
             raw_patch = raw_patch * brightness_factor
             raw_patch = np.clip(raw_patch, 0, 255)
 
+        if kp is not None:
+            return raw_patch, mask_patch, kp
         return raw_patch, mask_patch
+
+    @staticmethod
+    def _rotate_targets(kp: dict, matrix, size_wh):
+        """Warp landmark targets by the mask's rotation `matrix`. The heatmap is
+        interpolated; the direction fields and their validity use NEAREST so
+        unit vectors stay unit, and their vectors are rotated by the matrix's
+        linear part. Everything outside the rotated frame becomes 0 / invalid."""
+        linear = matrix[:, :2]
+
+        def warp(channel, flag):
+            return cv2.warpAffine(channel, matrix, size_wh, flags=flag,
+                                  borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+        paf = kp["paf"].copy()
+        for a in (0, 2):
+            vx, vy = paf[a].copy(), paf[a + 1].copy()
+            paf[a] = linear[0, 0] * vx + linear[0, 1] * vy
+            paf[a + 1] = linear[1, 0] * vx + linear[1, 1] * vy
+        root = kp["root_vec"].copy()
+        rx, ry = root[0].copy(), root[1].copy()
+        root[0] = linear[0, 0] * rx + linear[0, 1] * ry
+        root[1] = linear[1, 0] * rx + linear[1, 1] * ry
+        return dict(
+            kp,
+            hm=warp(kp["hm"], cv2.INTER_LINEAR),
+            paf=np.stack([warp(c, cv2.INTER_NEAREST) for c in paf]),
+            paf_valid=np.stack([warp(c, cv2.INTER_NEAREST) for c in kp["paf_valid"]]),
+            collar_hm=warp(kp["collar_hm"], cv2.INTER_LINEAR),
+            root_vec=np.stack([warp(c, cv2.INTER_NEAREST) for c in root]),
+            root_valid=np.stack([warp(c, cv2.INTER_NEAREST) for c in kp["root_valid"]]),
+        )
 
     def __getitem__(self, idx):
         row = self.rows[idx]
         raw_patch, mask_patch = self._load_patch(row)
+        kp = self._load_targets(row) if self.landmarks is not None else None
 
         if self.augment:
-            raw_patch, mask_patch = self._augment(raw_patch, mask_patch)
+            if kp is None:
+                raw_patch, mask_patch = self._augment(raw_patch, mask_patch)
+            else:
+                raw_patch, mask_patch, kp = self._augment(raw_patch, mask_patch, kp)
 
         if self.binarize_mask:
             mask_patch = np.where(
@@ -155,4 +239,22 @@ class PatchDataset(Dataset):
 
         image_chw = np.ascontiguousarray(raw_patch.transpose(2, 0, 1)).astype(np.float32)
         label_hw = np.ascontiguousarray(mask_patch).astype(np.int64)
-        return torch.from_numpy(image_chw), torch.from_numpy(label_hw)
+        if kp is None:
+            return torch.from_numpy(image_chw), torch.from_numpy(label_hw)
+
+        # The junction must actually be inside this patch (after augmentation)
+        # for the landmark terms and the overhook label to apply: a tile of a
+        # tall crop that misses the hook says nothing about it.
+        has_kp = float(kp["hm"].max() > PEAK_PRESENT)
+        targets = {
+            "hm": torch.from_numpy(np.ascontiguousarray(kp["hm"])),
+            "paf": torch.from_numpy(np.ascontiguousarray(kp["paf"])),
+            "paf_valid": torch.from_numpy(np.ascontiguousarray(kp["paf_valid"])),
+            "overhook": torch.tensor(kp["overhook"] * has_kp, dtype=torch.float32),
+            "has_kp": torch.tensor(has_kp, dtype=torch.float32),
+            "collar_hm": torch.from_numpy(np.ascontiguousarray(kp["collar_hm"])),
+            "root_vec": torch.from_numpy(np.ascontiguousarray(kp["root_vec"])),
+            "root_valid": torch.from_numpy(np.ascontiguousarray(kp["root_valid"])),
+            "has_collar": torch.tensor(float(kp["collar_hm"].max() > PEAK_PRESENT), dtype=torch.float32),
+        }
+        return torch.from_numpy(image_chw), torch.from_numpy(label_hw), targets

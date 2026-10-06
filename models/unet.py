@@ -168,8 +168,43 @@ def head_from_state_dict(state_dict: dict) -> str:
     return HEAD_PLAIN
 
 
+KP_CHANNELS = 5  # landmark head: 1 junction-heatmap logit + 2 x (x, y) direction fields
+KP_CHANNELS_ROOT = 8  # + 1 collar-heatmap logit + the root (x, y) direction field
+
+
+def has_landmark_head(state_dict: dict) -> bool:
+    """True if a bare state_dict carries the optional landmark head
+    (`conv_kp.*` / `cls_overhook.*`). Like head_from_state_dict, the keys are the
+    only evidence: checkpoints record no architecture metadata. Tolerates the
+    'module.' prefix of DataParallel-saved checkpoints."""
+    for key in state_dict:
+        name = key[len("module."):] if key.startswith("module.") else key
+        if name.startswith(("conv_kp.", "cls_overhook.", "kp_trunk.")):
+            return True
+    return False
+
+
+def landmark_root_from_state_dict(state_dict: dict) -> bool:
+    """True when the landmark head also predicts the collar and root direction
+    (conv_kp has 8 output channels instead of 5)."""
+    for name, value in state_dict.items():
+        if name.replace("module.", "", 1) == "conv_kp.weight":
+            return int(value.shape[0]) == KP_CHANNELS_ROOT
+    return False
+
+
+def landmark_hidden_from_state_dict(state_dict: dict) -> int:
+    """Width of the optional landmark trunk (`kp_trunk.*`), 0 when the head is the
+    plain 1x1 `conv_kp` straight on the final features."""
+    for name, value in state_dict.items():
+        if name.replace("module.", "", 1).startswith("kp_trunk.0.weight"):
+            return int(value.shape[0])
+    return 0
+
+
 class UNetGNRes(nn.Module):
-    def __init__(self, im_channels=3, n_classes=2, head=HEAD_GROUPNORM):
+    def __init__(self, im_channels=3, n_classes=2, head=HEAD_GROUPNORM, landmark_head=False, landmark_hidden=0,
+                 landmark_root=False):
         super().__init__()
         self.conv_in = nn.Sequential(
             nn.Conv2d(im_channels, 64, kernel_size=3, padding=1),  # padding 0
@@ -195,7 +230,44 @@ class UNetGNRes(nn.Module):
         self.head = head
         self.conv_out = build_conv_out(n_classes, head)
 
-    def forward(self, x):
+        # Optional landmark head (junction heatmap + direction fields + an
+        # image-level overhook logit), fed by the same final 64-channel
+        # features as conv_out. It is deliberately NOT part of conv_out /
+        # n_classes: every consumer of the segmentation output (focal alpha,
+        # argmax, softmax) assumes all channels are classes, and a groupnorm
+        # head cannot express a heatmap (it normalises each channel per
+        # image). Absent by default, so every existing checkpoint and the
+        # GUI path (UNetInference builds UNetGNRes() with no arguments) are
+        # unaffected.
+        self.landmark_head = bool(landmark_head)
+        if self.landmark_head:
+            # landmark_hidden > 0 puts a small dilated-conv trunk (receptive field
+            # ~35 px beyond the backbone) between the shared features and the two
+            # landmark outputs. A bare 1x1 on the segmentation features could not
+            # learn junctions or directions (they are class-specific features).
+            self.landmark_hidden = int(landmark_hidden)
+            width = self.landmark_hidden or 64
+            if self.landmark_hidden:
+                layers, in_ch = [], 64
+                for dilation in (1, 2, 4, 8):
+                    layers += [nn.Conv2d(in_ch, width, kernel_size=3, padding=dilation, dilation=dilation),
+                               nn.ReLU(), nn.GroupNorm(32, width)]
+                    in_ch = width
+                self.kp_trunk = nn.Sequential(*layers)
+            self.landmark_root = bool(landmark_root)
+            self.conv_kp = nn.Conv2d(width, KP_CHANNELS_ROOT if self.landmark_root else KP_CHANNELS,
+                                     kernel_size=1, padding=0)
+            self.cls_overhook = nn.Linear(width, 1)
+            # Start the junction channel at a low prior (sigmoid(-4.6) = 0.01) like
+            # CornerNet/CenterNet. At 0.5 everywhere, the ~63k background pixels of a
+            # 252x252 patch swamp the single peak and the heatmap loss starts about
+            # 270 times the segmentation loss, which wrecks a warm start.
+            with torch.no_grad():
+                self.conv_kp.bias[0] = -4.6
+                if self.landmark_root:
+                    self.conv_kp.bias[5] = -4.6          # collar heatmap, same low prior
+
+    def _features(self, x):
         out1 = self.conv_in(x)
         out2 = self.down1(out1)
         out3 = self.down2(out2)
@@ -205,8 +277,22 @@ class UNetGNRes(nn.Module):
         out = self.up2(out, out3)
         out = self.up3(out, out2)
         out = self.up4(out, out1)
-        out = self.conv_out(out)
         return out
+
+    def forward(self, x):
+        return self.conv_out(self._features(x))
+
+    def forward_with_landmarks(self, x):
+        """(segmentation logits, landmark maps, overhook logit). The spatial
+        outputs are the model's raw (16-multiple) size: crop both to the label
+        grid with align_output_to_target. overhook is (N,) -- a logit from the
+        globally pooled features."""
+        if not self.landmark_head:
+            raise RuntimeError("this model was built without landmark_head=True")
+        feats = self._features(x)
+        kp_feats = self.kp_trunk(feats) if self.landmark_hidden else feats
+        return (self.conv_out(feats), self.conv_kp(kp_feats),
+                self.cls_overhook(kp_feats.mean(dim=(2, 3))).squeeze(1))
 
 
 def align_output_to_target(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

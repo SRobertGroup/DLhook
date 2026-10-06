@@ -222,6 +222,48 @@ def build_queue(crops, per_seedling, seed):
     return queue
 
 
+def load_queue(folder, per_seedling, seed, manifest_path=None, split=None, patch_index_dir=None):
+    """The frames to annotate, exactly as the annotator builds them (the
+    sample is deterministic given these arguments)."""
+    crops = discover_crops(folder, manifest_path)
+    if split:
+        crops = filter_crops(crops, load_split_filenames(patch_index_dir, split))
+    return build_queue(crops, per_seedling, seed)
+
+
+def repeat_queue(source_csvs, n=200, seed=0, max_per_seedling=4, folder=None):
+    """A blind re-measurement sample: `n` frames that were already MEASURED in the given
+    annotation CSVs, drawn at random over their seedlings (at most `max_per_seedling` of each,
+    so the sample spreads over seedlings instead of piling up on the ones with many frames), in a
+    fully shuffled order. Nothing of the earlier measurement is carried into the queue, so the
+    annotator sees only the crop. With `folder`, frames whose crop file is missing are skipped.
+    Deterministic for a given seed."""
+    rows, seen = [], set()
+    for path in source_csvs:
+        with open(path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                key = (row.get("series", ""), int(row["crop_id"]), row["frame"])
+                if row.get("status") != "measured" or key in seen:
+                    continue
+                if folder is not None and not os.path.exists(os.path.join(folder, row["crop_file"])):
+                    continue
+                seen.add(key)
+                rows.append(row)
+    rows.sort(key=lambda r: (r.get("series", ""), int(r["crop_id"]), _natural_key(r["frame"])))
+    random.Random(f"repeat:{seed}").shuffle(rows)
+    taken, queue = {}, []
+    for row in rows:
+        seedling = (row.get("series", ""), int(row["crop_id"]))
+        if max_per_seedling and taken.get(seedling, 0) >= max_per_seedling:
+            continue
+        taken[seedling] = taken.get(seedling, 0) + 1
+        queue.append(WorkItem(int(row["crop_id"]), row["frame"], row["crop_file"], row.get("series", ""),
+                              row.get("img_name", "")))
+        if len(queue) >= n:
+            break
+    return queue
+
+
 # --- persistence ------------------------------------------------------------
 
 class AnnotationStore:
@@ -263,6 +305,17 @@ class AnnotationStore:
 
     def save_skipped(self, item):
         self._put(item, self._base_row(item, "skipped"))
+
+    def skip_unrecorded(self, queue):
+        """Record every frame of `queue` with no row yet as skipped, in one
+        write. Returns how many were added. For files made before the tool
+        recorded frames passed over with Next as skipped."""
+        todo = [item for item in queue if self.get(item) is None]
+        for item in todo:
+            self.rows[(item.series, item.crop_id, item.frame)] = self._base_row(item, "skipped")
+        if todo:
+            self._save_atomic()
+        return len(todo)
 
     def _base_row(self, item, status):
         row = {f: "" for f in CSV_FIELDS}

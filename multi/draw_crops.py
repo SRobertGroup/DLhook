@@ -17,6 +17,16 @@ series by recrop_plates.py, exactly like the GUI's own crop-box workflow.
 Run:
     python -m multi.draw_crops --example-data example_data --out crop_boxes.json
 
+Drawing a validation set next to existing ones (read-only reference boxes):
+    python -m multi.draw_crops --out crop_boxes_validation.json --existing training=cropped_training_set
+        --existing new=cropped_new_set --existing open=cropped_open_set
+`--existing [LABEL=]PATH` is repeatable; PATH is a crop folder (its manifest.csv, which records what
+was actually cut), a manifest.csv, or a boxes .json. Each reference set is drawn per series in its own
+colour as thin dashed boxes tagged LABEL#seedling-number, on top of the plate; they cannot be
+selected, moved or drawn through by accident. A box of yours that touches a reference box turns
+magenta and the status line names the worst overlap, so a validation set can be kept free of plants
+that were trained on. Press E to hide / show the references.
+
 Output (crop_boxes.json), consumed unmodified by
 multi.recrop_plates.load_boxes_file:
     {"F1_Plate_2_YS": [{"cx": 428, "cy": 2783, "half_w": 120, "half_h": 90}, ...]}
@@ -195,6 +205,61 @@ def resize_rect_from_corners(x1: float, y1: float, x2: float, y2: float,
     return {"cx": (min_x + max_x) / 2, "cy": (min_y + max_y) / 2, "half_w": half_w, "half_h": half_h}
 
 
+REFERENCE_COLORS = ("#2e86de", "#27ae60", "#8e44ad", "#16a085", "#c0392b", "#7f8c8d")
+
+
+def _rect_to_box(x1, y1, x2, y2) -> dict:
+    return {"cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2, "half_w": (x2 - x1) / 2, "half_h": (y2 - y1) / 2}
+
+
+def load_reference_boxes(spec: str):
+    """(label, {series: [box, ...]}) from an `--existing` value `[LABEL=]PATH`.
+
+    PATH is a crop folder (its manifest.csv), a manifest.csv (one box per (series, crop_id),
+    from the pixels actually cut, so the list index is the crop id in the file names) or a boxes
+    .json ({series: [{cx, cy, half_w, half_h}, ...]}). The label defaults to the file or folder
+    name."""
+    label, sep, path = spec.rpartition("=")
+    if not sep:
+        label, path = "", spec
+    path = Path(path)
+    if path.is_dir():
+        path = path / "manifest.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"--existing {spec!r}: {path} not found")
+    label = label or (path.parent.name if path.suffix == ".csv" else path.stem)
+    if path.suffix.lower() == ".json":
+        with open(path, "r", encoding="utf-8") as fh:
+            return label, {k: [dict(b) for b in v] for k, v in json.load(fh).items()}
+    import csv
+    per = {}
+    with open(path, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            per.setdefault(row["series"], {}).setdefault(int(row["crop_id"]), _rect_to_box(
+                *(float(row[k]) for k in ("x1", "y1", "x2", "y2"))))
+    return label, {series: [boxes[i] for i in sorted(boxes)] for series, boxes in per.items()}
+
+
+def box_overlap(box: dict, other: dict) -> float:
+    """Shared area over the smaller box (0 = disjoint, 1 = one lies inside the other); the measure
+    multi.check_crop_overlap reports."""
+    from multi.check_crop_overlap import overlap_fraction
+    from utils.crop_layout import box_to_rect
+    return overlap_fraction(box_to_rect(box), box_to_rect(other))
+
+
+def worst_reference_overlap(box: dict, references: list):
+    """(fraction, label, seedling_number) of the reference box `box` overlaps most, or (0.0, "", 0).
+    `references` is [(label, [box, ...])] for the current series."""
+    best = (0.0, "", 0)
+    for label, boxes in references:
+        for i, ref in enumerate(boxes):
+            frac = box_overlap(box, ref)
+            if frac > best[0]:
+                best = (frac, label, i + 1)
+    return best
+
+
 def round_box(box: dict) -> dict:
     """Round a box's fields to int -- the schema load_boxes_file/recrop_plates
     expect (drag arithmetic produces floats)."""
@@ -233,6 +298,7 @@ class CropBoxCanvas(ZoomableImageCanvas):
     COLOR_NORMAL = "#d78a5e"
     COLOR_SELECTED = "#ff3b30"
     COLOR_PREVIEW = "#00c8ff"
+    COLOR_CONFLICT = "#ff00aa"      # a box that touches a reference (--existing) box
 
     def __init__(self, parent, on_change=None, **kwargs):
         super().__init__(parent, **kwargs)
@@ -246,6 +312,8 @@ class CropBoxCanvas(ZoomableImageCanvas):
         self._drag_orig_box = None        # move: a copy of the box being moved
         self._drag_handle = None          # resize: which corner is being dragged
         self._preview_box = None          # draw: live padded-preview box
+        self.references = []              # [(label, color, [box, ...])] of the series on screen, read-only
+        self.show_references = True
 
         self.bind("<Button-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_drag)
@@ -265,6 +333,25 @@ class CropBoxCanvas(ZoomableImageCanvas):
 
     def get_boxes(self) -> list:
         return [dict(box) for box in self.boxes]
+
+    def set_references(self, references: list) -> None:
+        """Read-only boxes drawn under the editable ones: [(label, color, [box, ...])]."""
+        self.references = [(label, color, [dict(b) for b in boxes]) for label, color, boxes in references]
+        self._redraw()
+
+    def toggle_references(self) -> None:
+        self.show_references = not self.show_references
+        self._redraw()
+
+    def conflicts(self) -> list:
+        """[(index, fraction, label, seedling_number)] of the editable boxes that touch a reference box."""
+        refs = [(label, boxes) for label, _, boxes in self.references]
+        out = []
+        for i, box in enumerate(self.boxes):
+            frac, label, number = worst_reference_overlap(box, refs)
+            if frac > 0:
+                out.append((i, frac, label, number))
+        return out
 
     def delete_selected(self) -> bool:
         if self.selected_index is None:
@@ -425,17 +512,27 @@ class CropBoxCanvas(ZoomableImageCanvas):
         super()._redraw()
         if self._image is None:
             return
+        if self.show_references:
+            for label, color, boxes in self.references:
+                for n, ref in enumerate(boxes, start=1):
+                    x1, y1, x2, y2 = self._box_canvas_rect(ref)
+                    self.create_rectangle(x1, y1, x2, y2, outline=color, width=1, dash=(5, 3), tags="ref_box")
+                    self.create_text(x1 + 3, y1 + 2, text=f"{label}#{n}", anchor="nw", fill=color,
+                                     font=("Segoe UI", 8, "bold"), tags="ref_box")
+        conflicting = {i for i, *_ in self.conflicts()} if self.references else set()
         for i, box in enumerate(self.boxes):
-            self._draw_one_box(box, selected=(i == self.selected_index))
+            self._draw_one_box(box, selected=(i == self.selected_index), conflict=(i in conflicting))
         if self._preview_box is not None:
             self._draw_one_box(self._preview_box, selected=True, preview=True)
 
-    def _draw_one_box(self, box, selected, preview=False):
+    def _draw_one_box(self, box, selected, preview=False, conflict=False):
         x1, y1, x2, y2 = self._box_canvas_rect(box)
         if preview:
             outline, width, dash = self.COLOR_PREVIEW, 2, (4, 2)
         elif selected:
             outline, width, dash = self.COLOR_SELECTED, 3, None
+        elif conflict:
+            outline, width, dash = self.COLOR_CONFLICT, 3, None
         else:
             outline, width, dash = self.COLOR_NORMAL, 2, None
 
@@ -464,11 +561,12 @@ class DrawCropsApp(tk.Tk):
 
     POLL_MS = 50
 
-    def __init__(self, series_list: list, box_store: BoxStore, canvas_size=(1000, 720)):
+    def __init__(self, series_list: list, box_store: BoxStore, canvas_size=(1000, 720), references=None):
         super().__init__()
         self.title("DLhook - manual crop-box drawing")
         self.series_list = series_list
         self.box_store = box_store
+        self.references = list(references or [])      # [(label, {series: [box, ...]})], read-only
         self.index = 0
         self.reporter = ProgressReporter()
         self._load_token = 0
@@ -485,6 +583,9 @@ class DrawCropsApp(tk.Tk):
         top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=4)
         self.status_var = tk.StringVar(value="")
         tk.Label(top, textvariable=self.status_var, anchor="w", font=("Segoe UI", 11)).pack(side=tk.LEFT)
+        for k, (label, _) in enumerate(self.references):
+            tk.Label(top, text=f"  - - {label}", fg=REFERENCE_COLORS[k % len(REFERENCE_COLORS)],
+                     font=("Segoe UI", 10, "bold")).pack(side=tk.RIGHT)
 
         width, height = canvas_size
         self.canvas = CropBoxCanvas(self, width=width, height=height, on_change=self._on_boxes_changed)
@@ -496,6 +597,9 @@ class DrawCropsApp(tk.Tk):
         tk.Button(bottom, text="Next (N) >>", command=self.next_series).pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(bottom, text="Delete box (Del)", command=self._delete_selected).pack(side=tk.LEFT, padx=(18, 0))
         tk.Button(bottom, text="Reset zoom (R)", command=self.canvas.reset_zoom).pack(side=tk.LEFT, padx=(6, 0))
+        if self.references:
+            tk.Button(bottom, text="Show/hide existing (E)", command=self.canvas.toggle_references).pack(
+                side=tk.LEFT, padx=(18, 0))
 
         help_text = ("Draw: drag empty space   Move: drag a box   Resize: drag its corner handle   "
                      "Select: click a box   Delete: Del/Backspace   Deselect: Esc   "
@@ -511,6 +615,8 @@ class DrawCropsApp(tk.Tk):
         for key in ("<r>", "<R>"):
             self.bind(key, lambda e: self.canvas.reset_zoom())
         self.bind("<Escape>", lambda e: self.canvas.clear_selection())
+        for key in ("<e>", "<E>"):
+            self.bind(key, lambda e: self.canvas.toggle_references())
 
     # ---- series navigation / async frame loading ----
 
@@ -556,6 +662,8 @@ class DrawCropsApp(tk.Tk):
 
         self.canvas.set_image(image)
         self.canvas.reset_zoom()  # set_image only auto-fits on the very first image ever
+        self.canvas.set_references([(label, REFERENCE_COLORS[k % len(REFERENCE_COLORS)], per.get(name, []))
+                                    for k, (label, per) in enumerate(self.references)])
         self.canvas.set_boxes(self.box_store.get(name))
         self._update_status()
 
@@ -567,8 +675,16 @@ class DrawCropsApp(tk.Tk):
     def _update_status(self):
         name = self.series_list[self.index][0]
         n_boxes = len(self.canvas.boxes)
-        self.status_var.set(
-            f"series {self.index + 1}/{len(self.series_list)}, {n_boxes} boxes  ({name})")
+        text = f"series {self.index + 1}/{len(self.series_list)}, {n_boxes} boxes  ({name})"
+        n_ref = sum(len(b) for _, _, b in self.canvas.references)
+        if self.references:
+            text += f"  -  {n_ref} existing boxes shown"
+            conflicts = self.canvas.conflicts()
+            if conflicts:
+                worst = max(conflicts, key=lambda c: c[1])
+                text += (f"  -  {len(conflicts)} of yours touch one (worst: box {worst[0] + 1} x "
+                         f"{worst[2]}#{worst[3]}, {worst[1]:.0%})")
+        self.status_var.set(text)
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +698,9 @@ def build_arg_parser():
     parser.add_argument("--out", default=None,
                          help="crop_boxes.json path -- loaded on startup if it exists (resumable), "
                               "saved atomically on every box edit (default: <repo>/crop_boxes.json)")
+    parser.add_argument("--existing", action="append", default=[], metavar="[LABEL=]PATH",
+                         help="Show an earlier set of boxes read-only (repeatable): a crop folder, its "
+                              "manifest.csv, or a boxes .json. Your boxes that touch one turn magenta.")
     return parser
 
 
@@ -596,8 +715,11 @@ def main(argv=None) -> int:
         print(f"No series with image files found under {example_data_dir}")
         return 1
 
+    references = [load_reference_boxes(spec) for spec in args.existing]
+    for label, per in references:
+        print(f"existing '{label}': {sum(len(v) for v in per.values())} boxes in {len(per)} series")
     box_store = BoxStore(out_path)
-    app = DrawCropsApp(series_list, box_store)
+    app = DrawCropsApp(series_list, box_store, references=references)
     app.mainloop()
     return 0
 

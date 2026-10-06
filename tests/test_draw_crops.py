@@ -217,3 +217,49 @@ def test_box_store_rejects_downstream_when_a_key_is_missing(tmp_path):
 
     with pytest.raises(ValueError, match="half_h"):
         load_boxes_file(str(out_path))
+
+
+# ---------------------------------------------------------------------------
+# Read-only reference boxes (--existing)
+# ---------------------------------------------------------------------------
+
+def _manifest(path, rows):
+    import csv
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["series", "crop_id", "x1", "y1", "x2", "y2"])
+        w.writerows(rows)
+
+
+def test_reference_boxes_load_from_a_folder_a_manifest_or_json(tmp_path):
+    from multi.draw_crops import load_reference_boxes
+    folder = tmp_path / "cropped_x"
+    folder.mkdir()
+    # rows repeat per frame; crop 1 listed before crop 0 -> the list is ordered by crop id
+    _manifest(folder / "manifest.csv", [["S", 1, 300, 0, 400, 200], ["S", 0, 0, 0, 100, 200],
+                                        ["S", 0, 0, 0, 100, 200], ["T", 0, 10, 10, 50, 90]])
+    label, per = load_reference_boxes(str(folder))
+    assert label == "cropped_x" and len(per["S"]) == 2 and len(per["T"]) == 1
+    assert per["S"][0] == {"cx": 50.0, "cy": 100.0, "half_w": 50.0, "half_h": 100.0}
+    assert per["S"][1]["cx"] == 350.0
+    assert load_reference_boxes(f"mine={folder / 'manifest.csv'}")[0] == "mine"
+    (tmp_path / "b.json").write_text(json.dumps({"S": [{"cx": 1, "cy": 2, "half_w": 3, "half_h": 4}]}), encoding="utf-8")
+    label, per = load_reference_boxes(str(tmp_path / "b.json"))
+    assert label == "b" and per == {"S": [{"cx": 1, "cy": 2, "half_w": 3, "half_h": 4}]}
+    import pytest
+    with pytest.raises(FileNotFoundError):
+        load_reference_boxes(str(tmp_path / "nope"))
+
+
+def test_worst_reference_overlap_names_the_seedling_it_touches():
+    from multi.draw_crops import worst_reference_overlap
+    refs = [("train", [{"cx": 50, "cy": 100, "half_w": 50, "half_h": 100},
+                       {"cx": 350, "cy": 100, "half_w": 50, "half_h": 100}]),
+            ("new", [{"cx": 700, "cy": 100, "half_w": 50, "half_h": 100}])]
+    away = {"cx": 200, "cy": 100, "half_w": 30, "half_h": 80}
+    assert worst_reference_overlap(away, refs) == (0.0, "", 0)
+    inside = {"cx": 360, "cy": 100, "half_w": 20, "half_h": 50}
+    assert worst_reference_overlap(inside, refs) == (1.0, "train", 2)         # lies fully inside train seedling 2
+    partial = {"cx": 650, "cy": 100, "half_w": 50, "half_h": 100}
+    frac, label, number = worst_reference_overlap(partial, refs)
+    assert label == "new" and number == 1 and 0.4 < frac < 0.6

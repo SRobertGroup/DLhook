@@ -10,7 +10,9 @@ from tkinter.ttk import Progressbar, Style, Separator
 from tkinter.filedialog import asksaveasfilename, askdirectory
 from tkinter import simpledialog, messagebox
 from models.UNetInference import *  # RootPainter
-from models.segmentation_backends import get_backend, resolve_backend_name
+from models.segmentation_backends import (
+    get_backend, get_germination_runner, resolve_backend_name, resolve_germination_method,
+)
 # from numpy.lib.function_base import select
 from utils.apicalhook_angle import *
 from utils.angle_timeseries import reconstruct_series, sync_angle_and_state_lists
@@ -929,6 +931,10 @@ class Gui():
         just re-detects against the current, possibly fuller, history."""
         if self.germination_detector is None:
             self.germination_detector = GerminationDetector()
+        # Learned detector first (models/segmentation_backends.py: resolve_germination_method);
+        # the area-near-the-seed rule below is the fallback and DLHOOK_GERMINATION=rule.
+        if self._detect_germination_learned(crop_id):
+            return
         frame_contours = self.germ_time_series_by_crop.get(crop_id, [])
         seed_point = self.crop_points_distributed[crop_id][0]
         box = self.crop_boxes[crop_id]
@@ -944,6 +950,25 @@ class Gui():
         # empty, nonzero-but-below-threshold means the threshold needs tuning.
         if self.debug_var.get() == 1:
             print(f"[DEBUG] germination {self.germination_detector.describe(crop_id)}")
+
+    def _detect_germination_learned(self, crop_id):
+        """Time-zero from the learned detector over this seedling's crops, in the same frame order
+        as its frame results. Returns False (so the caller falls back to the rule) when the method
+        is 'rule', there are no crops yet, or the learned run fails."""
+        if resolve_germination_method() != "learned":
+            return False
+        files = self.cropped_filenames_by_crop.get(crop_id, [])
+        if not files:
+            return False
+        try:
+            onset, probs = get_germination_runner().onset([os.path.join("data/images", f) for f in files])
+        except Exception as exc:                      # never let time-zero detection sink an analysis
+            print(f"[WARNING] learned germination failed for seedling {crop_id + 1} ({exc}); using the area rule")
+            return False
+        self.germination_detector.record_learned(crop_id, onset, probs)
+        if self.debug_var.get() == 1:
+            print(f"[DEBUG] germination {self.germination_detector.describe(crop_id)}")
+        return True
 
     def _reconstruct_series_for_crop(self, crop_id):
         """Runs the angle-through-time temporal reconstruction (see

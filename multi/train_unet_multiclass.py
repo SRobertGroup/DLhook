@@ -26,9 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.config import load_config, resolved_path
 from src.data_loader import PatchDataset
-from src.landmarks import load_landmarks, readout_from_fields, split_by_seedling, theta_between
+from src.landmarks import (landmark_patch_rows, load_landmarks, namespace_landmarks, readout_from_fields,
+                           split_by_seedling, theta_between)
 from src.loss_functions import align_output_to_target, build_loss, landmark_loss
 from src.model import build_model
+from models.unet import strip_deprecated_landmark_keys
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -148,7 +150,7 @@ def run_epoch(model, loader, loss_fn, optimizer, device, desc: str,
             use_landmarks = targets is not None and landmark_weights is not None
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 if use_landmarks:
-                    outputs, kp_out, overhook_out = model.forward_with_landmarks(images)
+                    outputs, kp_out = model.forward_with_landmarks(images)
                 else:
                     outputs = model(images)
                 # See align_output_to_target's docstring: PatchDataset feeds
@@ -160,7 +162,7 @@ def run_epoch(model, loader, loss_fn, optimizer, device, desc: str,
                 outputs = align_output_to_target(outputs, masks)
                 loss = loss_fn(outputs, masks)
                 if use_landmarks:
-                    kp_loss, _ = landmark_loss(align_output_to_target(kp_out, masks), overhook_out,
+                    kp_loss, _ = landmark_loss(align_output_to_target(kp_out, masks),
                                                 targets, landmark_weights)
                     loss = loss + kp_loss
             if is_train:
@@ -197,17 +199,16 @@ def run_landmark_validation(model, loader, device, readout_radius: float = 3.0,
     junction the model fails to find counts as `missing_penalty_deg` -- otherwise
     a head that predicts nothing would score a perfect (empty) mean.
 
-    Returns landmark_angle_mae (deg), junction_px_err, overhook_acc,
+    Returns landmark_angle_mae (deg), junction_px_err,
     landmark_found (fraction) and n; the means are NaN when the loader holds no
     patch with a junction."""
     model.eval()
-    angle_err, junction_err, overhook_ok, found, n = [], [], [], 0, 0
+    angle_err, junction_err, found, n = [], [], 0, 0
     collar_err, root_err = [], []
     with torch.no_grad():
         for images, masks, targets in loader:
-            _, kp_out, overhook_out = model.forward_with_landmarks(images.to(device))
+            _, kp_out = model.forward_with_landmarks(images.to(device))
             kp_out = align_output_to_target(kp_out, masks).float().cpu()
-            overhook_p = torch.sigmoid(overhook_out.float()).cpu().numpy()
             hm_p = torch.sigmoid(kp_out[:, 0]).numpy()
             vec_p = kp_out[:, 1:5].numpy()
             has_root = kp_out.shape[1] >= 8 and "collar_hm" in targets
@@ -216,11 +217,11 @@ def run_landmark_validation(model, loader, device, readout_radius: float = 3.0,
                 root_p = kp_out[:, 6:8].numpy()
             for i in range(images.shape[0]):
                 if has_root and float(targets["has_collar"][i]) > 0.5 and float(targets["has_kp"][i]) > 0.5:
-                    t_c = readout_from_fields(targets["hm"][i].numpy(), targets["paf"][i].numpy(), 0.0,
+                    t_c = readout_from_fields(targets["hm"][i].numpy(), targets["paf"][i].numpy(),
                                               radius=readout_radius, collar_hm=targets["collar_hm"][i].numpy(),
                                               root_vec=targets["root_vec"][i].numpy())
                     if t_c is not None and t_c["collar"] is not None and t_c["root_dir"] is not None:
-                        p_c = readout_from_fields(hm_p[i], vec_p[i], 0.0, radius=readout_radius,
+                        p_c = readout_from_fields(hm_p[i], vec_p[i], radius=readout_radius,
                                                   peak_threshold=0.0, collar_hm=collar_p[i], root_vec=root_p[i])
                         if p_c is None or p_c["collar"] is None or p_c["root_dir"] is None:
                             collar_err.append(missing_penalty_px)
@@ -232,12 +233,11 @@ def run_landmark_validation(model, loader, device, readout_radius: float = 3.0,
                 if float(targets["has_kp"][i]) < 0.5:
                     continue
                 truth = readout_from_fields(targets["hm"][i].numpy(), targets["paf"][i].numpy(),
-                                            float(targets["overhook"][i]), radius=readout_radius)
+                                            radius=readout_radius)
                 if truth is None:
                     continue
                 n += 1
-                overhook_ok.append(float((overhook_p[i] > 0.5) == (float(targets["overhook"][i]) > 0.5)))
-                pred = readout_from_fields(hm_p[i], vec_p[i], overhook_p[i], radius=readout_radius)
+                pred = readout_from_fields(hm_p[i], vec_p[i], radius=readout_radius)
                 if pred is None:
                     angle_err.append(missing_penalty_deg)
                     continue
@@ -249,7 +249,6 @@ def run_landmark_validation(model, loader, device, readout_radius: float = 3.0,
     return {
         "landmark_angle_mae": float(np.mean(angle_err)) if angle_err else nan,
         "junction_px_err": float(np.mean(junction_err)) if junction_err else nan,
-        "overhook_acc": float(np.mean(overhook_ok)) if overhook_ok else nan,
         "landmark_found": found / n if n else nan,
         "collar_px_err": float(np.mean(collar_err)) if collar_err else nan,
         "root_angle_err": float(np.mean(root_err)) if root_err else nan,
@@ -259,7 +258,8 @@ def run_landmark_validation(model, loader, device, readout_radius: float = 3.0,
 
 def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, raw_ext: str = ".png",
                                       patch_size: int = 252, readout_radius: float = 3.0,
-                                      missing_penalty_deg: float = 90.0, missing_penalty_px: float = 30.0) -> dict:
+                                      missing_penalty_deg: float = 90.0, missing_penalty_px: float = 30.0,
+                                      raw_paths: dict | None = None) -> dict:
     """Landmark metrics on WHOLE crops of the held-out annotated seedlings, read through
     MulticlassInference's own tiling and readout -- the conditions the model is used in.
     The patch metrics of run_landmark_validation score 252 px tiles, where padding,
@@ -268,7 +268,8 @@ def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, r
 
     Errors are against the annotated landmark itself (not a re-rendered target). A crop
     with no junction found counts as missing_penalty_deg; a missing collar as
-    missing_penalty_px / missing_penalty_deg."""
+    missing_penalty_px / missing_penalty_deg. `raw_paths` ({name: image path}) overrides
+    raw_dir for crops from other folders (landmarks.extra_sources)."""
     import cv2
     from models.UNetInference import MARGIN
     from models.multiclass_inference import MulticlassInference
@@ -276,7 +277,8 @@ def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, r
     model.eval()
     images, kept = [], []
     for name in sorted(landmarks):
-        image = cv2.imread(str(Path(raw_dir) / (Path(name).stem + raw_ext)))
+        path = (raw_paths or {}).get(name) or Path(raw_dir) / (Path(name).stem + raw_ext)
+        image = cv2.imread(str(path))
         if image is not None:
             images.append(image)
             kept.append(name)
@@ -312,7 +314,61 @@ def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, r
     }
 
 
-LANDMARK_COLUMNS = ["landmark_angle_mae", "junction_px_err", "overhook_acc"]
+def load_extra_landmark_sources(config: dict, sources, existing: dict, patch_size: int, stride: int):
+    """Landmark-only annotation sets from `landmarks.extra_sources` (a list of {csv, raw_dir,
+    root_csv?, tag?}): crops outside the training patch index, e.g. a former test set or
+    another crop folder. They are loaded WITHOUT the validation-split guard (listing a set
+    here is the opt-in), keyed "<tag>/<crop file>" when a tag is given (needed whenever crop
+    names can repeat those of another folder), and tiled with all-ignore labels so only the
+    landmark loss sees them. A source may carry `seedling_groups: <json>` ({"series:crop_id":
+    "[tag/]series:crop_id"}, written by multi/match_seedlings.py) naming the seedlings it shares
+    a plant with in another set, so the held-out split keeps one plant on one side.
+    Returns (landmarks, raw_paths, patch_rows)."""
+    import json
+    from dataclasses import replace
+
+    from PIL import Image
+
+    landmarks, raw_paths, sizes = {}, {}, {}
+    for i, src in enumerate(sources or ()):
+        holder = {"src": src, "_data_root": config.get("_data_root")}
+        raw_dir = resolved_path(holder, "raw_dir", section="src")
+        lms, report = load_landmarks(resolved_path(holder, "csv", section="src"),
+                                     root_csv_path=(resolved_path(holder, "root_csv", section="src")
+                                                    if src.get("root_csv") else None))
+        tag = src.get("tag")
+        keyed = namespace_landmarks(lms, tag) if tag else lms
+        if src.get("seedling_groups"):
+            groups = json.loads(resolved_path(holder, "seedling_groups", section="src").read_text(encoding="utf-8"))
+            grouped = {}
+            for key, lm in keyed.items():
+                raw_series = lm.seedling[0][len(tag) + 1:] if tag else lm.seedling[0]
+                target = groups.get(f"{raw_series}:{lm.seedling[1]}")
+                if target:
+                    t_series, _, t_id = target.rpartition(":")
+                    lm = replace(lm, seedling=(t_series, int(t_id)))
+                grouped[key] = lm
+            keyed = grouped
+        clash = sorted((set(keyed) & set(existing)) | (set(keyed) & set(landmarks)))
+        if clash:
+            raise ValueError(f"landmarks.extra_sources[{i}] ({src['csv']}): {len(clash)} crop names already "
+                             f"used by another landmark set (e.g. {clash[0]!r}); give this source a tag")
+        missing = 0
+        for key, lm in keyed.items():
+            path = raw_dir / (key.split("/", 1)[1] if tag else key)
+            if not path.exists():
+                missing += 1
+                continue
+            with Image.open(path) as im:
+                w, h = im.size
+            landmarks[key], raw_paths[key], sizes[key] = lm, path, (h, w)
+        print(f"Extra landmarks {src['csv']}: {len(keyed) - missing} loaded"
+              + (f" as {tag}/..." if tag else "") + (f", {missing} crops missing in {raw_dir}" if missing else "")
+              + (f", {report['with_root']} with collar/root" if "with_root" in report else ""))
+    return landmarks, raw_paths, landmark_patch_rows(sizes, patch_size, stride, raw_paths)
+
+
+LANDMARK_COLUMNS = ["landmark_angle_mae", "junction_px_err"]
 WHOLECROP_COLUMNS = ["wholecrop_theta_mae", "wholecrop_theta_median", "wholecrop_junction_px"]
 WHOLECROP_ROOT_COLUMNS = ["wholecrop_collar_px", "wholecrop_root_deg"]
 ROOT_COLUMNS = ["collar_px_err", "root_angle_err"]          # only when landmarks.root_csv is set
@@ -345,6 +401,10 @@ def run_training(config: dict, resume: bool = False) -> dict:
     # rest of the network, so a randomly initialised head's gradients cannot
     # disturb the warm-started segmentation encoder.
     head_only_epochs = int(lm_cfg.get("head_only_epochs", 0)) if use_landmarks else 0
+    # Modules trained during the head-only epochs: the landmark head, plus any listed in
+    # landmarks.trainable_extra (e.g. ["up4."] to let the last decoder stage adapt while the
+    # rest of the backbone stays frozen; segmentation is still guarded by min_mean_fg_dice).
+    head_prefixes = ("conv_kp.", "kp_trunk.") + tuple(lm_cfg.get("trainable_extra") or ())
     lm_train, lm_val, lm_weights = None, {}, None
     lm_columns = (LANDMARK_COLUMNS + (ROOT_COLUMNS if lm_cfg.get("root_csv") else [])
                   + WHOLECROP_COLUMNS + (WHOLECROP_ROOT_COLUMNS if lm_cfg.get("root_csv") else []))
@@ -364,6 +424,10 @@ def run_training(config: dict, resume: bool = False) -> dict:
             raise ValueError("landmarks.root_csv requires model.landmark_root: true")
         if not all_landmarks:
             raise ValueError("landmarks.enabled but no usable annotated train-split crop was found")
+        extra_landmarks, lm_raw_paths, lm_extra_rows = load_extra_landmark_sources(
+            config, lm_cfg.get("extra_sources"), all_landmarks, int(data_cfg.get("patch_size", 252)),
+            int(data_cfg.get("train_stride", data_cfg.get("patch_size", 252))))
+        all_landmarks = {**all_landmarks, **extra_landmarks}
         lm_train, lm_val = split_by_seedling(all_landmarks, lm_cfg.get("val_fraction", 0.15),
                                              training_cfg.get("seed", 0))
         lm_weights = lm_cfg.get("loss_weights") or {}
@@ -375,6 +439,7 @@ def run_training(config: dict, resume: bool = False) -> dict:
         seed=training_cfg.get("seed", 0),
         raw_ext=raw_ext, binarize_mask=binarize_mask,
         landmarks=lm_train, landmark_cfg=lm_cfg,
+        extra_rows=[r for r in lm_extra_rows if r["filename"] in lm_train] if use_landmarks else None,
     )
     val_dataset = PatchDataset(
         patch_index_dir / "val_patches.csv", raw_dir, masks_dir, augment=False,
@@ -399,7 +464,7 @@ def run_training(config: dict, resume: bool = False) -> dict:
         lm_val_dataset = PatchDataset(
             patch_index_dir / "train_patches.csv", raw_dir, masks_dir, augment=False,
             raw_ext=raw_ext, binarize_mask=binarize_mask,
-            landmarks=lm_val, filenames=set(lm_val), landmark_cfg=lm_cfg,
+            landmarks=lm_val, filenames=set(lm_val), landmark_cfg=lm_cfg, extra_rows=lm_extra_rows,
         )
         lm_val_loader = DataLoader(lm_val_dataset, batch_size=training_cfg["batch_size"],
                                     shuffle=False, num_workers=num_workers)
@@ -471,7 +536,7 @@ def run_training(config: dict, resume: bool = False) -> dict:
                 f"--resume was passed but no checkpoint exists at {last_checkpoint_path}"
             )
         checkpoint = torch.load(last_checkpoint_path, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint["model_state_dict"])
+        model.load_state_dict(strip_deprecated_landmark_keys(checkpoint["model_state_dict"]))
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if scaler is not None and checkpoint.get("scaler_state_dict") is not None:
             scaler.load_state_dict(checkpoint["scaler_state_dict"])
@@ -525,7 +590,7 @@ def run_training(config: dict, resume: bool = False) -> dict:
             if use_landmarks:
                 head_only = epoch < head_only_epochs
                 for name, param in model.named_parameters():
-                    param.requires_grad = (not head_only) or name.startswith(("conv_kp.", "cls_overhook.", "kp_trunk."))
+                    param.requires_grad = (not head_only) or name.startswith(head_prefixes)
 
             extra_kwargs = {"landmark_weights": lm_weights} if use_landmarks else {}
             train_loss, _ = run_epoch(model, train_loader, loss_fn, optimizer, device,
@@ -543,7 +608,7 @@ def run_training(config: dict, resume: bool = False) -> dict:
                               if lm_val_loader is not None else {})
                 if lm_val:
                     lm_metrics.update(run_wholecrop_landmark_validation(
-                        model, lm_val, raw_dir, device, raw_ext=raw_ext,
+                        model, lm_val, raw_dir, device, raw_ext=raw_ext, raw_paths=lm_raw_paths,
                         patch_size=int(data_cfg.get("patch_size", 252)),
                         readout_radius=lm_cfg.get("readout_radius", 3.0)))
                 for key in lm_columns:
@@ -596,8 +661,7 @@ def run_training(config: dict, resume: bool = False) -> dict:
             lm_text = ""
             if use_landmarks and lm_metrics:
                 lm_text = (f" landmark_angle_mae={lm_metrics['landmark_angle_mae']:.1f}"
-                           f" junction_px_err={lm_metrics['junction_px_err']:.1f}"
-                           f" overhook_acc={lm_metrics['overhook_acc']:.2f}")
+                           f" junction_px_err={lm_metrics['junction_px_err']:.1f}")
                 if "wholecrop_theta_mae" in lm_metrics:
                     lm_text += (f" | whole-crop theta={lm_metrics['wholecrop_theta_mae']:.1f}"
                                 f" (median {lm_metrics['wholecrop_theta_median']:.1f})"

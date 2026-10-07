@@ -28,19 +28,11 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.germination_learned import FEATURE_NAMES, best_onset, frame_features  # noqa: E402
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 FEATURE_DIR = _REPO_ROOT / "multi" / "results" / "germination_validation"
-FEATURE_NAMES = ["r_max", "r_top20", "r_log_mass", "r_log_n50", "r_log_n20", "c_log_mass", "h_log_mass"]
-
-
-def frame_features(probs):
-    """Features of one crop's softmax maps (4, H, W): class 3 = radicle, 1 = cotyledon, 2 = hypocotyl."""
-    radicle = probs[3].ravel()
-    top = np.sort(radicle)[-20:] if radicle.size else np.zeros(1)
-    return [float(radicle.max()) if radicle.size else 0.0, float(top.mean()),
-            float(np.log1p(radicle.sum())), float(np.log1p((radicle > 0.5).sum())),
-            float(np.log1p((radicle > 0.2).sum())),
-            float(np.log1p(probs[1].sum())), float(np.log1p(probs[2].sum()))]
 
 
 def extract_features(seedlings, folder, checkpoint, cache):
@@ -106,15 +98,6 @@ def predict_probs(model, x):
     return 1.0 / (1.0 + np.exp(-z))
 
 
-def best_onset(p):
-    """Index k in 0..n minimising the step-function log-loss: frames < k not visible, >= k visible.
-    k == n means no radicle in the series."""
-    p = np.clip(np.asarray(p, float), 1e-4, 1 - 1e-4)
-    before = np.concatenate([[0.0], np.cumsum(-np.log(1 - p))])       # cost of calling frames < k negative
-    after = np.concatenate([np.cumsum((-np.log(p))[::-1])[::-1], [0.0]])   # cost of calling frames >= k positive
-    return int(np.argmin(before + after))
-
-
 def threshold_onset(areas, thr, window=3, hits=2):
     """The app's rule (utils/germination_detector.py) on a per-frame area series, seed-independent."""
     n = len(areas)
@@ -142,6 +125,9 @@ def main(argv=None) -> int:
     p.add_argument("--group", choices=("seedling", "series"), default="seedling",
                    help="cross-validate over held-out seedlings (default) or held-out whole series")
     p.add_argument("--no-save", action="store_true")
+    p.add_argument("--apply", default=None, metavar="WEIGHTS_JSON",
+                   help="Do not fit: score saved weights (e.g. weights/germination_detector.json) on --truth / "
+                        "--folder -- the out-of-sample test on seedlings the detector never saw")
     p.add_argument("--out", default=str(_REPO_ROOT / "weights" / "germination_detector.json"))
     args = p.parse_args(argv)
     sys.path.insert(0, str(_REPO_ROOT))
@@ -153,10 +139,37 @@ def main(argv=None) -> int:
     truth = {k: v for k, v in load_truth(args.truth).items() if v["status"] == "found"}
     seedlings = [s for s in load_seedlings(args.folder, default_manifest(args.folder)) if s.key in truth]
     print(f"{len(seedlings)} seedlings with a marked onset, {sum(len(s) for s in seedlings)} frames")
-    feats = extract_features(seedlings, args.folder, args.checkpoint, FEATURE_DIR / "frame_features.csv")
+    folder_name = Path(args.folder).name
+    cache = FEATURE_DIR / ("frame_features.csv" if folder_name == "cropped_training_set"
+                           else f"frame_features_{folder_name}.csv")
+    feats = extract_features(seedlings, args.folder, args.checkpoint, cache)
 
     def labels(s):
         return (np.arange(len(s)) >= truth[s.key]["onset_index"]).astype(float)
+
+    n = len(seedlings)
+    if args.apply:
+        saved = json.loads(Path(args.apply).read_text(encoding="utf-8"))
+        if saved["features"] != FEATURE_NAMES:
+            raise SystemExit(f"{args.apply} was fitted on different features: {saved['features']}")
+        model = (np.array(saved["mean"]), np.array(saved["std"]), np.array(saved["weights"]), float(saved["bias"]))
+        errors, frame_ok = [], []
+        for s in seedlings:
+            probs = predict_probs(model, feats[s.key])
+            frame_ok.append(((probs > 0.5) == labels(s).astype(bool)).mean())
+            k = best_onset(probs)
+            if k < len(s):
+                errors.append(k - truth[s.key]["onset_index"])
+        print(f"\nsaved detector ({args.apply}, fitted on {saved.get('trained_on')}) on {os.path.basename(args.truth)}:")
+        print("  " + summarise(errors, n - len(errors), n))
+        print(f"  per-frame accuracy {np.mean(frame_ok):.1%}")
+        area = {s.key: np.expm1(feats[s.key][:, FEATURE_NAMES.index("r_log_n50")]) for s in seedlings}
+        for thr in (5, 20, 50):
+            errs = [threshold_onset(area[s.key], thr) for s in seedlings]
+            errs = [d - truth[s.key]["onset_index"] for s, d in zip(seedlings, errs) if d is not None]
+            print(f"area rule, radicle pixels >= {thr:3d} anywhere in the crop:")
+            print("  " + summarise(errs, n - len(errs), n))
+        return 0
 
     rng = np.random.RandomState(0)
     if args.group == "series":
@@ -182,7 +195,6 @@ def main(argv=None) -> int:
             k = best_onset(probs_all[s.key])
             learned_err.append(k - truth[s.key]["onset_index"] if k < len(s) else None)
 
-    n = len(seedlings)
     detected = [e for e in learned_err if e is not None]
     print("\nlearned detector (cross-validated, held-out " + ("whole series" if args.group == "series" else "seedlings") + "):")
     print("  " + summarise(detected, n - len(detected), n))

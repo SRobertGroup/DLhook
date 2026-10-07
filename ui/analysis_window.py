@@ -517,7 +517,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             return
         # Distinguishing manual from detected matters: it's the difference
         # between "the model found this" and "I told it this".
-        source = "manual" if detector.has_override(self.crop_id) else "detected"
+        method = detector.method(self.crop_id)
+        source = {"manual": "manual", "learned": "detected (learned)"}.get(method, "detected (area rule)")
         self.germ_label.configure(text=f"{source}: frame {time_zero + 1}")
 
     # --- Rendering --------------------------------------------------------

@@ -59,7 +59,10 @@ from models.UNetInference import (
     _pad_to_min,
 )
 from models.normalization import zscore_normalize
-from models.unet import UNetGNRes, align_output_to_target, has_landmark_head, head_from_state_dict, landmark_hidden_from_state_dict, landmark_root_from_state_dict
+from models.unet import (
+    UNetGNRes, align_output_to_target, has_landmark_head, head_from_state_dict,
+    landmark_hidden_from_state_dict, landmark_root_from_state_dict, strip_deprecated_landmark_keys,
+)
 from utils.landmark_readout import READOUT_RADIUS, readout_from_fields
 
 CPU_BATCH_SIZE = 4
@@ -101,7 +104,8 @@ class MulticlassInference:
         # exactly how the remainder is removed (a centered crop). This
         # tensor only ever has its .shape read, never its values.
         self._out_shape_ref = torch.empty(out_size, out_size)
-        state_dict = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+        state_dict = strip_deprecated_landmark_keys(
+            torch.load(checkpoint_path, map_location=self.device, weights_only=True))
         # The two conv_out heads have DIFFERENT state_dict keys (the
         # groupnorm head adds conv_out.2.{weight,bias}), and these
         # checkpoints are bare state_dicts with no architecture metadata, so
@@ -289,48 +293,72 @@ class MulticlassInference:
     # --- landmark head -------------------------------------------------------
 
     def _run_batch_landmarks(self, tiles):
-        """Per tile: (junction probability map, 4 direction-field maps, overhook
-        probability, extra), the maps cropped to out_size like the segmentation
-        output; extra is None, or for a collar/root head {"collar_hm", "root_vec"}.
+        """Per tile: (junction probability map, 4 direction-field maps, extra), the maps
+        cropped to out_size like the segmentation output; extra is None, or for a
+        collar/root head {"collar_hm", "root_vec"}.
         Same per-tile z-score as _run_batch."""
         batch = np.stack([zscore_normalize(t) for t in tiles]).transpose(0, 3, 1, 2)
         tensor = torch.from_numpy(batch).to(self.device)
         with torch.inference_mode():
-            _, kp, overhook = self._core().forward_with_landmarks(tensor)
+            _, kp = self._core().forward_with_landmarks(tensor)
             kp = align_output_to_target(kp, self._out_shape_ref).float()
             hm = torch.sigmoid(kp[:, 0]).cpu().numpy()
             vec = kp[:, 1:5].cpu().numpy()
-            overhook = torch.sigmoid(overhook.float()).cpu().numpy()
             extra = None
             if kp.shape[1] >= 8:
                 collar = torch.sigmoid(kp[:, 5]).cpu().numpy()
                 root = kp[:, 6:8].cpu().numpy()
                 extra = [{"collar_hm": collar[i], "root_vec": root[i]} for i in range(hm.shape[0])]
-        return [(hm[i], vec[i], float(overhook[i]), extra[i] if extra else None) for i in range(hm.shape[0])]
+        return [(hm[i], vec[i], extra[i] if extra else None) for i in range(hm.shape[0])]
 
-    def predict_landmarks(self, images, readout_radius: float = READOUT_RADIUS):
+    # Average every landmark map over the crop and its mirror image (x components of the
+    # direction fields negated back). On held-out seedlings this cut the angle MAE from 15.9 to
+    # 15.0 deg and on new seedlings from 32.4 to 30.4 (median 12.4 -> 10.6) for twice the compute;
+    # set flip_tta=False on an instance (or per call) for the single pass.
+    flip_tta = True
+
+    def predict_landmarks(self, images, readout_radius: float = READOUT_RADIUS, flip_tta=None):
         """Hook angle from the landmark head for a list of native BGR crops.
 
         Returns one entry per image: the dict from
-        utils.landmark_readout.readout_from_fields (junction, theta, bio,
-        overhook, directions, peak), or None when no junction is found."""
-        return [readout_from_fields(hm, vec, prob, radius=readout_radius, **(extra or {}))
-                for hm, vec, prob, extra in self.predict_landmark_fields(images)]
+        utils.landmark_readout.readout_from_fields (junction, theta, bio = 180 - theta,
+        directions, peak), or None when no junction is found."""
+        return [readout_from_fields(hm, vec, radius=readout_radius, **(extra or {}))
+                for hm, vec, extra in self.predict_landmark_fields(images, flip_tta=flip_tta)]
 
-    def predict_landmark_fields(self, images):
+    def predict_landmark_fields(self, images, flip_tta=None):
+        """Landmark maps per crop (see _landmark_fields_once), averaged with the mirrored crop's
+        maps when flip test-time augmentation is on (the default, see flip_tta)."""
+        flip_tta = self.flip_tta if flip_tta is None else flip_tta
+        plain = self._landmark_fields_once(images)
+        if not flip_tta or not images:
+            return plain
+        mirrored = self._landmark_fields_once([np.ascontiguousarray(im[:, ::-1]) for im in images])
+        out = []
+        for (hm, vec, extra), (hf, vf, ef) in zip(plain, mirrored):
+            vf = vf[:, :, ::-1].copy()
+            vf[[0, 2]] *= -1.0                              # x components flip sign with the image
+            merged = None
+            if extra is not None and ef is not None:
+                rf = ef["root_vec"][:, :, ::-1].copy()
+                rf[0] *= -1.0
+                merged = {"collar_hm": (extra["collar_hm"] + ef["collar_hm"][:, ::-1]) / 2,
+                          "root_vec": (extra["root_vec"] + rf) / 2}
+            out.append(((hm + hf[:, ::-1]) / 2, (vec + vf) / 2, merged))
+        return out
+
+    def _landmark_fields_once(self, images):
         """Raw landmark maps for a list of native BGR crops: one (hm (H, W),
-        vec (4, H, W), overhook_prob, extra) per image, at the crop's own size (extra is
+        vec (4, H, W), extra) per image, at the crop's own size (extra is
         None, or {"collar_hm" (H, W), "root_vec" (2, H, W)} for a collar/root head), so a
         caller can read the angle at a junction other than the heatmap peak
         (e.g. one tracked across frames).
-        Tiles are stitched like the segmentation output (overwrite). The
-        overhook probability is image-level, so it is taken from the tile with
-        the strongest junction peak -- the tile that actually contains the hook.
+        Tiles are stitched like the segmentation output (overwrite).
         Requires a checkpoint trained with the landmark head."""
         if not self.has_landmarks:
-            raise RuntimeError("this checkpoint has no landmark head (no conv_kp / cls_overhook keys)")
+            raise RuntimeError("this checkpoint has no landmark head (no conv_kp keys)")
 
-        plans, hm_out, vec_out, best = [], [], [], []
+        plans, hm_out, vec_out = [], [], []
         collar_out, root_out = [], []
         work = []
         for idx, image in enumerate(images):
@@ -340,21 +368,18 @@ class MulticlassInference:
             vec_out.append(np.zeros((4, base_h, base_w), dtype=np.float32))
             collar_out.append(np.zeros((base_h, base_w), dtype=np.float32))
             root_out.append(np.zeros((2, base_h, base_w), dtype=np.float32))
-            best.append((-1.0, 0.0))                       # (strongest tile peak, its overhook prob)
             plans.append((orig_h, orig_w, base_pad))
             for (x, y) in tile_coords:
                 work.append((idx, x, y, padded[y:y + self.in_size, x:x + self.in_size]))
 
         for start in range(0, len(work), self.batch_size):
             chunk = work[start:start + self.batch_size]
-            for (idx, x, y, _), (hm, vec, overhook, extra) in zip(chunk, self._run_batch_landmarks([c[3] for c in chunk])):
+            for (idx, x, y, _), (hm, vec, extra) in zip(chunk, self._run_batch_landmarks([c[3] for c in chunk])):
                 hm_out[idx][y:y + self.out_size, x:x + self.out_size] = hm
                 vec_out[idx][:, y:y + self.out_size, x:x + self.out_size] = vec
                 if extra is not None:
                     collar_out[idx][y:y + self.out_size, x:x + self.out_size] = extra["collar_hm"]
                     root_out[idx][:, y:y + self.out_size, x:x + self.out_size] = extra["root_vec"]
-                if float(hm.max()) > best[idx][0]:
-                    best[idx] = (float(hm.max()), overhook)
 
         results = []
         for idx, (orig_h, orig_w, base_pad) in enumerate(plans):
@@ -365,14 +390,15 @@ class MulticlassInference:
             if self._core().landmark_root:
                 extra = {"collar_hm": _crop_from_pad(collar_out[idx], base_pad),
                          "root_vec": np.stack([_crop_from_pad(root_out[idx][c], base_pad) for c in range(2)])}
-            results.append((hm, vec, best[idx][1], extra))
+            results.append((hm, vec, extra))
         return results
 
-    def predict_files_landmarks(self, image_paths, fields=False, readout_radius: float = READOUT_RADIUS):
+    def predict_files_landmarks(self, image_paths, fields=False, readout_radius: float = READOUT_RADIUS,
+                                flip_tta=None):
         """{basename: readout dict or None} for image paths, chunked like
         predict_files_labelmaps (unreadable paths are skipped with the same
         warning and absent from the result). With fields=True the value is the
-        raw (hm, vec, overhook_prob, extra) from predict_landmark_fields instead."""
+        raw (hm, vec, extra) from predict_landmark_fields instead."""
         out = {}
         for start in range(0, len(image_paths), IMAGE_CHUNK):
             paths, images = [], []
@@ -384,9 +410,9 @@ class MulticlassInference:
                 paths.append(img_path)
                 images.append(image)
             if images:
-                results = self.predict_landmark_fields(images)
-                for img_path, (hm, vec, prob, extra) in zip(paths, results):
+                results = self.predict_landmark_fields(images, flip_tta=flip_tta)
+                for img_path, (hm, vec, extra) in zip(paths, results):
                     out[os.path.basename(img_path)] = (
-                        (hm, vec, prob, extra) if fields
-                        else readout_from_fields(hm, vec, prob, radius=readout_radius, **(extra or {})))
+                        (hm, vec, extra) if fields
+                        else readout_from_fields(hm, vec, radius=readout_radius, **(extra or {})))
         return out

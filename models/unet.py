@@ -172,6 +172,14 @@ KP_CHANNELS = 5  # landmark head: 1 junction-heatmap logit + 2 x (x, y) directio
 KP_CHANNELS_ROOT = 8  # + 1 collar-heatmap logit + the root (x, y) direction field
 
 
+def strip_deprecated_landmark_keys(state_dict: dict) -> dict:
+    """Drop the `cls_overhook.*` weights of checkpoints trained before the overhook flag was
+    removed from the landmark head (the flag is a few degrees past 180 deg, below the click
+    noise -- see docs/multiclass_progress.md). Everything else loads unchanged."""
+    return {k: v for k, v in state_dict.items()
+            if not k.replace("module.", "", 1).startswith("cls_overhook.")}
+
+
 def has_landmark_head(state_dict: dict) -> bool:
     """True if a bare state_dict carries the optional landmark head
     (`conv_kp.*` / `cls_overhook.*`). Like head_from_state_dict, the keys are the
@@ -230,8 +238,8 @@ class UNetGNRes(nn.Module):
         self.head = head
         self.conv_out = build_conv_out(n_classes, head)
 
-        # Optional landmark head (junction heatmap + direction fields + an
-        # image-level overhook logit), fed by the same final 64-channel
+        # Optional landmark head (junction heatmap + direction fields, optionally the
+        # collar and root direction), fed by the same final 64-channel
         # features as conv_out. It is deliberately NOT part of conv_out /
         # n_classes: every consumer of the segmentation output (focal alpha,
         # argmax, softmax) assumes all channels are classes, and a groupnorm
@@ -257,7 +265,6 @@ class UNetGNRes(nn.Module):
             self.landmark_root = bool(landmark_root)
             self.conv_kp = nn.Conv2d(width, KP_CHANNELS_ROOT if self.landmark_root else KP_CHANNELS,
                                      kernel_size=1, padding=0)
-            self.cls_overhook = nn.Linear(width, 1)
             # Start the junction channel at a low prior (sigmoid(-4.6) = 0.01) like
             # CornerNet/CenterNet. At 0.5 everywhere, the ~63k background pixels of a
             # 252x252 patch swamp the single peak and the heatmap loss starts about
@@ -283,16 +290,13 @@ class UNetGNRes(nn.Module):
         return self.conv_out(self._features(x))
 
     def forward_with_landmarks(self, x):
-        """(segmentation logits, landmark maps, overhook logit). The spatial
-        outputs are the model's raw (16-multiple) size: crop both to the label
-        grid with align_output_to_target. overhook is (N,) -- a logit from the
-        globally pooled features."""
+        """(segmentation logits, landmark maps). The spatial outputs are the model's
+        raw (16-multiple) size: crop both to the label grid with align_output_to_target."""
         if not self.landmark_head:
             raise RuntimeError("this model was built without landmark_head=True")
         feats = self._features(x)
         kp_feats = self.kp_trunk(feats) if self.landmark_hidden else feats
-        return (self.conv_out(feats), self.conv_kp(kp_feats),
-                self.cls_overhook(kp_feats.mean(dim=(2, 3))).squeeze(1))
+        return self.conv_out(feats), self.conv_kp(kp_feats)
 
 
 def align_output_to_target(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

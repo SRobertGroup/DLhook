@@ -21,7 +21,7 @@
 
 The pipeline has four stages:
 
-1. **Segmentation.** A U-Net with group normalisation and residual connections (`UNetGNRes`, PyTorch) segments each cropped seedling into two classes — **cotyledon** and **hypocotyl**. A third model detects **germination**, which fixes time zero for each seedling independently.
+1. **Segmentation.** A U-Net with group normalisation and residual connections (`UNetGNRes`, PyTorch) assigns every pixel of each cropped seedling to one of four classes — background, **cotyledon**, **hypocotyl**, or **radicle**. A separate model detects **germination** (the emerging radicle), which fixes time zero for each seedling independently. Earlier versions ran three separate two-class models instead of one four-class model; that path is retained and can still be selected — see [Which segmentation models run](#which-segmentation-models-run).
 2. **Geometry.** For every frame, an algorithm fits the cotyledon and stem, then computes the angle between them (`raw_angle`).
 3. **Temporal reconstruction.** Per-frame readings are noisy and periodically ambiguous. A reconstruction pass resolves each frame against the whole series, producing a continuous biological angle (`bio_angle`) and a state (`Closed` / `Opening`).
 4. **Review and export.** Every seedling can be inspected frame by frame, its masks corrected with a brush, and its angle overridden by hand before the results are written to a `.CSV`.
@@ -108,15 +108,51 @@ python main.py
 
 ### Model weights
 
-Three models are loaded at runtime from [`weights/RootPainter_weights/`](weights/RootPainter_weights/):
+By default three two-class RootPainter models are loaded at runtime (the `binary` backend):
 
-| File | Class | Purpose |
+| File | Provides | Purpose |
 |---|---|---|
-| `cotyledon_v5.pkl` | cotyledon | cotyledon orientation |
-| `hypocot_v5.pkl` | hypocotyl | hypocotyl direction |
-| `germ_v1.pkl` | germination | per-seedling time zero |
+| [`weights/RootPainter_weights/cotyledon_v5.pkl`](weights/RootPainter_weights/) | cotyledon | cotyledon orientation |
+| [`weights/RootPainter_weights/hypocot_v5.pkl`](weights/RootPainter_weights/) | hypocotyl | hypocotyl direction |
+| [`weights/RootPainter_weights/germ_v1.pkl`](weights/RootPainter_weights/) | germination | per-seedling time zero |
 
-A fourth model, Real-ESRGAN (`models/superres/RealESRGAN_x4plus.pth`), optionally super-resolves crops on CUDA.
+An experimental four-class model is available as an opt-in (see below). It uses these
+weights instead, and they are not all included in a fresh clone:
+
+| File | Provides | Purpose |
+|---|---|---|
+| `weights/multiclass/dlhook_4class_v1.pt` | cotyledon + hypocotyl | both classes from one four-class model |
+| `weights/RootPainter_weights/germ_v2.pkl` | germination | per-seedling time zero |
+
+Germination is kept on its own dedicated model rather than taken from the four-class
+model, because the detected germination frame sets each seedling's time zero and a shift
+there would move every downstream measurement for that seedling.
+
+A further model, Real-ESRGAN (`models/superres/RealESRGAN_x4plus.pth`), optionally
+super-resolves crops on CUDA. The 64 MB file is not in the repository: it is downloaded from the
+official Real-ESRGAN release on first use and checked against a pinned SHA-256
+(`models/superres/weights_info.py`); a file already at that path is used as is.
+
+### Which segmentation models run
+
+Set `DLHOOK_SEG_BACKEND` before launching to choose:
+
+| Value | Behaviour |
+|---|---|
+| `binary` *(default)* | Three two-class models: `cotyledon_v5.pkl`, `hypocot_v5.pkl`, `germ_v1.pkl`. |
+| `multiclass` *(experimental)* | Four-class model for cotyledon and hypocotyl, `germ_v2.pkl` for germination. |
+
+```bash
+DLHOOK_SEG_BACKEND=multiclass python main.py     # try the four-class model
+```
+
+`binary` stays the default until the four-class model has been validated: its precision
+against human annotations is still well below the binary models' (see
+[`docs/AUDIT.md`](docs/AUDIT.md), finding H-5). Use `multiclass` to compare the two
+directly. The value is read once when the application starts, so it cannot be changed
+part-way through a session — this is deliberate, so that one set of results can never mix
+output from two different models. An unrecognised value stops the program with an error
+rather than silently falling back.
 
 ![Example of a good hypocotyl segmentation](docs/img/Good_segmentation_RootPainter_hypocotyl.png)
 
@@ -161,13 +197,16 @@ Work on the **last frame** of the series, where the seedlings are most developed
 - **Start point** (dark blue) — just above the seed coat.
 - **End point** (purple) — at the apical hook.
 
-As soon as a pair is complete, DLhook derives a crop box around it automatically. Repeat for every seedling you want to measure.
+As soon as a pair is complete, DLhook derives a crop box around it automatically. Repeat for every seedling you want to measure, in any order.
 
-> Press **`z`** to undo the last click or the last completed pair.
+- **Boxes never overlap.** When a new box overlaps a neighbour, both are trimmed back to the midline of the gap between the two seedlings' clicked points. A box is never trimmed inside its own points. If two seedlings' points actually cross, the boxes cannot be separated: they are outlined in **red** and the status bar names them.
+- **Each box shows its seedling ID** in its top-left corner. IDs are numbered across the plate **top-to-bottom, then left-to-right**, and renumbered as you add or remove seedlings. This number is the `seedling_id` in the exported CSV and the number in *Preview seedling*.
+
+> Press **`z`** to undo the last click or the most recently placed pair. This works even if that seedling has since been renumbered.
 
 ### 2. `Adjust crop`
 
-The crop boxes are already positioned from your point pairs; this step is only for correcting them. Toggle **`Adjust crop`** on, then drag any box's **four corner handles** to resize or reposition it. Each seedling has its own independently sized box at native image resolution — nothing is scaled or stretched.
+The crop boxes are already positioned from your point pairs; this step is only for correcting them. Toggle **`Adjust crop`** on, then drag any box's **four corner handles** to resize or reposition it. A resize stops at a neighbouring box and at the image border, and IDs stay fixed while you adjust. Each seedling has its own independently sized box at native image resolution — nothing is scaled or stretched.
 
 > [!IMPORTANT]
 > Toggle **`Adjust crop`** back **off** when you are finished. Steps 3–6 stay disabled until you do.
@@ -247,11 +286,75 @@ Missing or unmeasurable values are written as empty strings.
 
 ### Angle convention
 
-`bio_angle` is a continuous scale on which **180° means a fully closed hook**, decreasing toward 0° as the cotyledon opens. An **overhooked** seedling — folded back past closed — reads **above** 180°. Reconstructed values are constrained to the biologically admissible band **0°–250°**.
+`bio_angle` is a continuous scale on which **180° means a fully closed hook**, decreasing toward 0° as the cotyledon opens. An **overhooked** seedling — folded back past closed — reads **above** 180°. Reconstructed values are constrained to the biologically admissible band **0°–220°** (up to 40° of overhook past closed).
 
 State is assigned with hysteresis to stop the label flickering at the transition: above **160°** the hook is treated as closed, below **150°** as opening, and the 150–160° band is a deadband. A seedling must stay below 150° for **5 consecutive frames** before the state commits to `Opening`.
 
 ---
+
+## Ground-truth angle annotation
+
+To check the automatic angles against your own measurements, measure a random sample of frames by hand with the annotation tool. It shows each seedling crop zoomed in and records the angle you measure.
+
+```bash
+python -m ui.angle_annotator --folder path/to/crops     # crops named {id}-crop-{frame}.png
+python -m ui.angle_annotator --folder path/to/crops --per-seedling 15 --seed 1
+```
+
+DLhook writes the crops to `data/images/` during *Start Analysis*, but wipes `data/` at startup and exit, so copy them to a folder of your own first if you want to annotate across sessions.
+
+You can also annotate the crops used to train the four-class model (`cropped_training_set/`, made by `multi/recrop_plates.py`). Its `manifest.csv` is picked up automatically, which keeps each series' seedlings apart (`crop_id` repeats across series) and records the source frame as `img_name`. Add `--split val` to keep only images the four-class model never trained on, which is the unbiased set to validate it with:
+
+```bash
+python -m ui.angle_annotator --folder cropped_training_set --split val
+```
+
+For each frame, click five points (the mouse wheel zooms at the cursor, and the zoom is kept between frames of the same seedling):
+
+1. the **junction** where the cotyledons meet the hypocotyl,
+2. two points on the **hypocotyl** axis,
+3. two points on the **cotyledon** axis.
+
+Each axis is oriented automatically away from the junction, so the order of the two points on an axis does not matter. Tick **Overhook** if the hook has folded back past closed. Press `Enter` to save and move on, `Backspace` to undo a point and `S` (or `Right` / *Next*) to skip a frame you cannot measure. Moving on from a frame you did not measure records it as **skipped**, so the CSV tells "looked at and rejected" apart from "not reached yet"; `Left` goes back without recording anything. If a CSV predates this behaviour, `python -m ui.angle_annotator --folder cropped_training_set --split val --mark-unrecorded-skipped` records every frame of the same sample that has no row as skipped (use the same `--folder`, `--split`, `--per-seedling` and `--seed` as the session) and exits without opening the window.
+
+To compare your measurements with the pipeline, run `python -m multi.validate_angles`. It runs the real pipeline with both backends on every crop of the seedlings you measured and prints the error per backend and per series (written to `multi/results/angle_validation/`).
+
+Frames are a reproducible random sample (`--per-seedling`, `--seed`), grouped by seedling and shuffled within it so you cannot be guided by time order. Results go to `angle_ground_truth.csv` in the repository root (change with `--out`). The file is saved after every frame, and the tool resumes where you stopped. `bio_angle` uses the same convention as the exported CSV (180 = closed, decreasing as the hook opens, above 180 = overhooked), and `seedling_id` and `frame` match the crop file names (plus `series` and `img_name` for the training crops), so the two can be joined directly.
+
+## Training a landmark head from your annotations
+
+The same clicks can retrain the four-class model to find the cotyledon/hypocotyl **junction** and the two axis directions directly, instead of fitting ellipses. That removes the direction ambiguity of an ellipse. The landmark angle is always `180 - theta`: there is no overhook reading, because overhooked frames sit only a few degrees past 180° (median 6.5°), below the repeatability of the clicks themselves (your own repeat measurements differ by about 4° at the median, and the overhook call by 8%).
+
+**1. Annotate training frames** (never reuse your test set):
+
+```bash
+python -m ui.angle_annotator --folder cropped_training_set --split train --out angle_landmarks_train.csv --per-seedling 10 --seed 1
+```
+
+Aim for at least 400 measured frames spread over the series. Click the same way every time, because the model learns exactly what you click:
+
+- **junction**: the joint where the cotyledons meet the hypocotyl;
+- **hypocotyl** points: on the midline of the stem just below the junction;
+- **cotyledon** points: on the midline of the cotyledon, starting at the junction;
+- the **Overhook** tick is still recorded in the CSV but ignored by landmark training and by `multi/validate_angles.py` (which scores against `180 - theta`; `--keep-overhook` restores the raw angle).
+
+`--split train` keeps your frames out of the validation split, and the training code drops any validation-split crop it finds in the CSV anyway, so `angle_ground_truth.csv` stays a clean test set.
+
+**2. Fine-tune** from the shipped four-class checkpoint (adds a landmark head, keeps the segmentation):
+
+```bash
+python multi/train_unet_multiclass.py --config multi/configs/training_landmarks.yaml
+```
+
+The first epochs train only the new head, then the whole network. The best epoch is chosen by the angle error on held-out annotated seedlings, among epochs whose segmentation score stays above `landmarks.min_mean_fg_dice`. Checkpoints go to `multi/results/models_landmarks/`.
+
+**3. Score it on your held-out ground truth**, next to the current pipeline:
+
+```bash
+python -m multi.validate_angles --backends multiclass --landmark-checkpoint multi/results/models_landmarks/best.pt
+```
+
+The landmark readings appear as `landmark` (per frame) and `landmark_recon` (after reconstruction). The GUI still uses the ellipse pipeline; switching it to landmarks is a separate step to take only if these numbers are better.
 
 ## Advanced
 
@@ -263,7 +366,7 @@ State is assigned with hysteresis to stop the label flickering at the transition
 DLHOOK_DUMP_MASKS=1 python main.py
 ```
 
-**Tests.** 38 tests cover the angle reconstruction, capture-time parsing, germination detection and brush editing:
+**Tests.** About 250 tests cover the angle reconstruction, capture-time parsing, germination detection, brush editing, crop-box layout, segmentation backends and the `multi/` training pipeline. No GPU or image data is needed:
 
 ```bash
 pytest

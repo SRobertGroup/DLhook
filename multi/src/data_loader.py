@@ -31,14 +31,21 @@ class PatchDataset(Dataset):
     def __init__(self, csv_path, raw_dir, masks_dir, augment: bool = False,
                  augmentation_cfg: dict | None = None, seed: int | None = None,
                  raw_ext: str = ".png", binarize_mask: bool = False,
-                 landmarks: dict | None = None, filenames=None, landmark_cfg: dict | None = None):
+                 landmarks: dict | None = None, filenames=None, landmark_cfg: dict | None = None,
+                 extra_rows=None):
         """`landmarks` ({crop file name: multi.src.landmarks.Landmark}) switches
         on landmark supervision: __getitem__ then returns a third element, a
-        dict of target tensors (hm, paf, paf_valid, overhook, has_kp), rendered
+        dict of target tensors (hm, paf, paf_valid, has_kp, ...), rendered
         on the label grid and put through exactly the same padding, crop, flip
         and rotation as the mask. Crops without a landmark yield all-zero
         targets with has_kp = 0. `filenames`, if given, keeps only the patch
-        rows of those crops. With landmarks=None nothing changes."""
+        rows of those crops. With landmarks=None nothing changes.
+
+        `extra_rows` are appended patch rows (same columns) for crops outside
+        raw_dir / the patch index, e.g. landmark-only annotation sets: a row
+        may carry `raw_path` (the crop image, overriding raw_dir) and
+        `no_mask` = "1" (no pseudo-label mask: the whole label patch is
+        IGNORE_VALUE, so only the landmark loss sees it)."""
         self.raw_dir = Path(raw_dir)
         self.masks_dir = Path(masks_dir)
         self.augment = augment
@@ -60,6 +67,7 @@ class PatchDataset(Dataset):
 
         with open(csv_path, "r", newline="", encoding="utf-8") as fh:
             self.rows = list(csv.DictReader(fh))
+        self.rows += [dict(r) for r in (extra_rows or ())]
         if filenames is not None:
             keep = set(filenames)
             self.rows = [r for r in self.rows if r["filename"] in keep]
@@ -76,13 +84,13 @@ class PatchDataset(Dataset):
         filename = row["filename"]
         x, y, size = int(row["x"]), int(row["y"]), int(row["patch_size"])
 
-        raw_path = self.raw_dir / (Path(filename).stem + self.raw_ext)
-        mask_path = self.masks_dir / filename
-
-        with Image.open(raw_path) as im:
+        with Image.open(self._raw_path(row)) as im:
             raw = np.array(im.convert("RGB")).astype(np.float32)
-        with Image.open(mask_path) as im:
-            mask = np.array(im.convert("L"))
+        if row.get("no_mask") == "1":
+            mask = np.full(raw.shape[:2], IGNORE_VALUE, np.uint8)
+        else:
+            with Image.open(self.masks_dir / filename) as im:
+                mask = np.array(im.convert("L"))
 
         # `size` (patch_size) is the LABEL region's size, and x/y are origins
         # into the patch_size-padded frame patch_index.py used to build the
@@ -112,21 +120,25 @@ class PatchDataset(Dataset):
         mask_patch = mask[y:y + size, x:x + size].copy()
         return raw_patch, mask_patch
 
+    def _raw_path(self, row):
+        if row.get("raw_path"):
+            return Path(row["raw_path"])
+        return self.raw_dir / (Path(row["filename"]).stem + self.raw_ext)
+
     def _load_targets(self, row):
         """Landmark targets for one patch row, on the label grid (size x size)."""
         size, x, y = int(row["patch_size"]), int(row["x"]), int(row["y"])
         lm = self.landmarks.get(row["filename"])
         if lm is None:
             return {"hm": np.zeros((size, size), np.float32), "paf": np.zeros((4, size, size), np.float32),
-                    "paf_valid": np.zeros((2, size, size), np.float32), "overhook": 0.0,
+                    "paf_valid": np.zeros((2, size, size), np.float32),
                     "collar_hm": np.zeros((size, size), np.float32),
                     "root_vec": np.zeros((2, size, size), np.float32),
                     "root_valid": np.zeros((1, size, size), np.float32)}
-        with Image.open(self.raw_dir / (Path(row["filename"]).stem + self.raw_ext)) as im:
+        with Image.open(self._raw_path(row)) as im:
             w, h = im.size
         t = render_targets(h, w, lm, sigma=self.hm_sigma, ray_width=self.ray_width)
         out = {k: pad_targets_to_min(v, size)[..., y:y + size, x:x + size].copy() for k, v in t.items()}
-        out["overhook"] = float(lm.overhook)
         return out
 
     def _augment(self, raw_patch: np.ndarray, mask_patch: np.ndarray, kp: dict | None = None):
@@ -243,14 +255,13 @@ class PatchDataset(Dataset):
             return torch.from_numpy(image_chw), torch.from_numpy(label_hw)
 
         # The junction must actually be inside this patch (after augmentation)
-        # for the landmark terms and the overhook label to apply: a tile of a
+        # for the landmark terms to apply: a tile of a
         # tall crop that misses the hook says nothing about it.
         has_kp = float(kp["hm"].max() > PEAK_PRESENT)
         targets = {
             "hm": torch.from_numpy(np.ascontiguousarray(kp["hm"])),
             "paf": torch.from_numpy(np.ascontiguousarray(kp["paf"])),
             "paf_valid": torch.from_numpy(np.ascontiguousarray(kp["paf_valid"])),
-            "overhook": torch.tensor(kp["overhook"] * has_kp, dtype=torch.float32),
             "has_kp": torch.tensor(has_kp, dtype=torch.float32),
             "collar_hm": torch.from_numpy(np.ascontiguousarray(kp["collar_hm"])),
             "root_vec": torch.from_numpy(np.ascontiguousarray(kp["root_vec"])),

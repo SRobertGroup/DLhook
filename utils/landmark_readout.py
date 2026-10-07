@@ -9,8 +9,8 @@ The landmark head predicts a junction HEATMAP and two unit-vector FIELDS
 heatmap peak; each direction is the mean field within `radius` pixels of it --
 where both rays start and the field is supervised (radius must stay <= the
 ray width used for the targets). theta is the angle between the two
-directions; the bio angle follows the annotator's convention: 180 - theta, or
-180 + theta when overhooked (utils/angle_annotation.py).
+directions; the bio angle is 180 - theta. There is no overhook (180 + theta) reading: the
+flag is a few degrees past 180 deg, below the repeatability of the clicks themselves.
 """
 from __future__ import annotations
 
@@ -27,9 +27,9 @@ def theta_between(u, v) -> float:
     return float(np.degrees(np.arccos(np.clip(u[0] * v[0] + u[1] * v[1], -1.0, 1.0))))
 
 
-def bio_from_theta(theta: float, overhook: bool) -> float:
-    """Same formula as the in-app manual angle and the annotator."""
-    return 180.0 + theta if overhook else 180.0 - theta
+def bio_from_theta(theta: float) -> float:
+    """Bio convention: 180 = closed, decreasing as the hook opens."""
+    return 180.0 - theta
 
 
 def _collar_readout(collar_hm, root_vec, radius, peak_threshold):
@@ -44,7 +44,7 @@ def _collar_readout(collar_hm, root_vec, radius, peak_threshold):
     return {**none, "collar": (cx + 0.5, cy + 0.5), "root_dir": (ax / norm, ay / norm) if norm > 1e-6 else None}
 
 
-def readout_from_fields(hm, vec, overhook_prob=None, radius=READOUT_RADIUS, peak_threshold=PEAK_FOUND,
+def readout_from_fields(hm, vec, radius=READOUT_RADIUS, peak_threshold=PEAK_FOUND,
                         collar_hm=None, root_vec=None):
     """Angle from predicted fields: hm (H, W) probabilities, vec (4, H, W).
 
@@ -54,7 +54,7 @@ def readout_from_fields(hm, vec, overhook_prob=None, radius=READOUT_RADIUS, peak
     `peak_threshold`. They never change the angle readout.
 
     Returns None when no junction peak is found or a direction is degenerate,
-    else a dict with junction (x, y), theta, bio, overhook, the two unit
+    else a dict with junction (x, y), theta, bio, the two unit
     directions and the heatmap peak."""
     if hm.size == 0 or float(hm.max()) < peak_threshold:
         return None
@@ -69,11 +69,9 @@ def readout_from_fields(hm, vec, overhook_prob=None, radius=READOUT_RADIUS, peak
             return None
         dirs.append((ax / n, ay / n))
     theta = theta_between(*dirs)
-    overhook = bool(overhook_prob is not None and overhook_prob > 0.5)
     extra = {}
     if collar_hm is not None and root_vec is not None:
         extra = _collar_readout(collar_hm, root_vec, radius, peak_threshold)
-    return {**extra, "junction": (jx + 0.5, jy + 0.5), "theta": theta, "overhook": overhook,
-            "bio": bio_from_theta(theta, overhook), "hypo_dir": dirs[0], "cotyl_dir": dirs[1],
-            "peak": float(hm.max()),
-            "overhook_prob": None if overhook_prob is None else float(overhook_prob)}
+    return {**extra, "junction": (jx + 0.5, jy + 0.5), "theta": theta,
+            "bio": bio_from_theta(theta), "hypo_dir": dirs[0], "cotyl_dir": dirs[1],
+            "peak": float(hm.max())}

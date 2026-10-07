@@ -29,8 +29,13 @@ def test_load_truth_keeps_only_measured_rows(tmp_path):
         {"series": "A", "crop_id": 0, "frame": "f2", "crop_file": "0-crop-A_f2.png", "status": "skipped"},
         {"series": "B", "crop_id": 1, "frame": "f1", "crop_file": "1-crop-B_f1.png", "status": "measured", "bio_angle": "200", "overhook": "1"},
     ])
-    rows = va.load_truth(str(path))
+    rows = va.load_truth(str(path), fold=False)
     assert [(r["series"], r["crop_id"], r["gt"], r["gt_overhook"]) for r in rows] == [("A", 0, 150.5, 0), ("B", 1, 200.0, 1)]
+    folded = va.load_truth(str(path))                       # the default drops the overhook flag: 200 -> 160
+    assert [(r["gt"], r["gt_overhook"]) for r in folded] == [(150.5, 0), (160.0, 0)]
+    assert va.fold_angle(200.0) == 160.0 and va.fold_angle(100.0) == 100.0 and va.fold_angle(None) is None
+    pred = va.fold_predictions({("A", 0, "f"): {"raw": 30.0, "raw_flip": 150.0, "recon": 215.0, "state": "x", "landmark": None}})
+    assert pred[("A", 0, "f")] == {"raw": 30.0, "raw_flip": 150.0, "recon": 145.0, "state": "x", "landmark": None}
 
 
 def test_load_series_keeps_manifest_order_and_only_wanted_seedlings(tmp_path):

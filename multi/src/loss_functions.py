@@ -73,17 +73,17 @@ def build_loss(cfg: dict) -> nn.Module:
     raise ValueError(f"Unknown loss.type: {loss_type!r} (expected 'cross_entropy' or 'focal')")
 
 
-DEFAULT_LANDMARK_WEIGHTS = {"hm": 1.0, "paf": 1.0, "overhook": 0.3, "collar": 1.0, "root": 1.0, "overhook_pos": 1.0}
+DEFAULT_LANDMARK_WEIGHTS = {"hm": 1.0, "paf": 1.0, "collar": 1.0, "root": 1.0}
 
 
-def landmark_loss(kp_logits: torch.Tensor, overhook_logit: torch.Tensor, targets: dict,
+def landmark_loss(kp_logits: torch.Tensor, targets: dict,
                   weights: dict | None = None):
     """Loss for the optional landmark head (models/unet.py: forward_with_landmarks),
     already cropped to the label grid.
 
     kp_logits (N,5,H,W): channel 0 = junction logit, 1..4 = hypocotyl/cotyledon
-    direction fields. overhook_logit (N,). `targets` holds hm (N,H,W), paf
-    (N,4,H,W), paf_valid (N,2,H,W), overhook (N,) and has_kp (N,).
+    direction fields. `targets` holds hm (N,H,W), paf (N,4,H,W), paf_valid (N,2,H,W)
+    and has_kp (N,).
 
     Every term is averaged over the samples with has_kp == 1 only -- a patch
     with no annotation, or one that does not contain the junction, contributes
@@ -95,9 +95,6 @@ def landmark_loss(kp_logits: torch.Tensor, overhook_logit: torch.Tensor, targets
       by the target's own mass (sum hm) rather than by pixel count, which would
       make the term vanishingly small on a 252x252 patch;
     * directions: L1 against the unit vector, only where paf_valid (the ray);
-    * overhook: binary cross-entropy on the image-level flag; weights["overhook_pos"]
-      (> 1) up-weights the positive class, which is the minority (about a quarter of
-      the annotated frames) and otherwise collapses to "never overhooked";
     * with an 8-channel head (kp_logits channels 5..7) and targets collar_hm /
       root_vec / root_valid / has_collar: the same heatmap loss on the collar and
       the same masked L1 on the root direction, each averaged over the samples that
@@ -108,8 +105,7 @@ def landmark_loss(kp_logits: torch.Tensor, overhook_logit: torch.Tensor, targets
     has = targets["has_kp"].to(kp_logits.dtype)
     n_has = has.sum()
     if float(n_has) == 0.0:
-        zero = kp_logits.sum() * 0.0 + overhook_logit.sum() * 0.0
-        return zero, {"hm": 0.0, "paf": 0.0, "overhook": 0.0}
+        return kp_logits.sum() * 0.0, {"hm": 0.0, "paf": 0.0}
 
     hm_t = targets["hm"].to(kp_logits.dtype)
     prob = torch.sigmoid(kp_logits[:, 0].float())
@@ -120,13 +116,8 @@ def landmark_loss(kp_logits: torch.Tensor, overhook_logit: torch.Tensor, targets
     l1 = ((kp_logits[:, 1:5].float() - targets["paf"].float()).abs() * valid.float()).sum(dim=(1, 2, 3))
     paf_loss = ((l1 / valid.float().sum(dim=(1, 2, 3)).clamp(min=1.0)) * has.float()).sum() / n_has
 
-    bce = F.binary_cross_entropy_with_logits(
-        overhook_logit.float(), targets["overhook"].float(), reduction="none",
-        pos_weight=torch.tensor(float(w["overhook_pos"]), device=overhook_logit.device))
-    oh_loss = (bce * has.float()).sum() / n_has
-
-    total = w["hm"] * hm_loss + w["paf"] * paf_loss + w["overhook"] * oh_loss
-    parts = {"hm": float(hm_loss.detach()), "paf": float(paf_loss.detach()), "overhook": float(oh_loss.detach())}
+    total = w["hm"] * hm_loss + w["paf"] * paf_loss
+    parts = {"hm": float(hm_loss.detach()), "paf": float(paf_loss.detach())}
 
     if kp_logits.shape[1] >= 8 and "collar_hm" in targets:
         has_c = (targets["has_collar"].to(kp_logits.dtype) * has).float()

@@ -14,8 +14,12 @@ Three readings are compared per frame, because the pipeline has two stages:
     raw_flip   180 - raw -- what Gui._reconstruct_series_for_crop feeds the
                reconstruction (it treats `raw` as 0 = closed)
     recon      the reconstructed bio angle the export writes (`bio_angle`)
-Ground truth is in the bio convention (180 = closed, > 180 = overhooked). Whichever
-variant matches it tells you which convention the pipeline really emits.
+Ground truth is in the bio convention (180 = closed, decreasing as the hook opens). The Overhook
+flag is DROPPED by default (it is a few degrees past 180, below the repeatability of the hand clicks):
+truth becomes 180 - theta and every reading is folded the same way (180 - |value - 180|), so an
+ellipse reading of 200 and a truth of 160 agree. --keep-overhook restores the raw convention
+(180 + theta for flagged frames). Whichever variant matches it tells you which convention the
+pipeline really emits.
 
 Assumptions you should know about:
 * The training crops carry no seed (start) point. A proxy is used: horizontally
@@ -61,19 +65,35 @@ VARIANTS = ("raw", "raw_flip", "recon", "landmark", "landmark_recon", "landmark_
 
 # --- pure helpers (unit-tested) ----------------------------------------------
 
-def load_truth(path):
-    """Measured rows of angle_ground_truth.csv, with typed fields."""
+FOLD_VARIANTS = tuple(v for v in VARIANTS if v != "raw")      # `raw` is the 0 = closed convention
+
+
+def fold_angle(value):
+    """Overhook dropped: reflect a bio angle above 180 back below it (180 - |value - 180|)."""
+    return None if value is None or value != value else 180.0 - abs(value - 180.0)
+
+
+def load_truth(path, fold=True):
+    """Measured rows of an annotation CSV, with typed fields. With fold (default) the Overhook flag
+    is dropped: gt = 180 - theta (theta is stored for every frame) and gt_overhook is 0."""
     rows = []
     with open(path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             if row["status"] != "measured":
                 continue
+            bio = float(row["bio_angle"])
             rows.append({
                 "series": row["series"], "crop_id": int(row["crop_id"]), "frame": row["frame"],
-                "crop_file": row["crop_file"], "gt": float(row["bio_angle"]),
-                "gt_overhook": int(row["overhook"] or 0),
+                "crop_file": row["crop_file"], "gt": fold_angle(bio) if fold else bio,
+                "gt_overhook": 0 if fold else int(row["overhook"] or 0),
             })
     return rows
+
+
+def fold_predictions(pred):
+    """fold_angle over every numeric reading of a {key: {reading: value}} prediction dict."""
+    return {key: {k: (fold_angle(v) if k in FOLD_VARIANTS else v) for k, v in entry.items()}
+            for key, entry in pred.items()}
 
 
 def load_series(manifest_path, truth_rows):
@@ -113,7 +133,7 @@ def error_stats(pred, truth):
         "mae": float(np.mean(np.abs(err))), "median_ae": float(np.median(np.abs(err))),
         "rmse": float(np.sqrt(np.mean(err ** 2))), "bias": float(np.mean(err)),
         "within10": float(np.mean(np.abs(err) <= 10)), "within20": float(np.mean(np.abs(err) <= 20)),
-        "overhook_agree": float(np.mean((p > 180) == (t > 180))),
+        "overhook_agree": float(np.mean((p > 180) == (t > 180))),     # only meaningful with --keep-overhook
     }
 
 
@@ -135,7 +155,7 @@ def _fmt(v, pct=False, nd=1):
 
 
 def format_table(results_by_backend):
-    lines = ["backend      reading    frames  read    MAE   median  bias   <=10deg <=20deg overhook-agree"]
+    lines = ["backend      reading    frames  read    MAE   median  bias   <=10deg <=20deg"]
     for backend, rows in results_by_backend.items():
         for variant in VARIANTS:
             if not any(r.get(variant) is not None for r in rows):
@@ -144,8 +164,7 @@ def format_table(results_by_backend):
             lines.append(
                 f"{backend:12s} {variant:9s} {s['n']:6d} {_fmt(s['coverage'], pct=True):>5s} "
                 f"{_fmt(s['mae']):>6s} {_fmt(s['median_ae']):>7s} {_fmt(s['bias']):>6s} "
-                f"{_fmt(s['within10'], pct=True):>7s} {_fmt(s['within20'], pct=True):>7s} "
-                f"{_fmt(s['overhook_agree'], pct=True):>9s}")
+                f"{_fmt(s['within10'], pct=True):>7s} {_fmt(s['within20'], pct=True):>7s}")
     return "\n".join(lines)
 
 
@@ -245,7 +264,7 @@ def run_landmarks(checkpoint, series, crops_dir):
         per_frame = [readouts[f]["bio"] if readouts.get(f) else None for f in files]
         with contextlib.redirect_stdout(io.StringIO()):
             recon, _ = reconstruct_series(per_frame)
-        temporal, _ = reconstruct_landmark_series([readouts.get(f) for f in files])
+        temporal = reconstruct_landmark_series([readouts.get(f) for f in files])
         for f, raw_value, recon_value, temporal_value in zip(files, per_frame, recon, temporal):
             out[(series_name, crop_id, f)] = {
                 "landmark": raw_value,
@@ -284,6 +303,9 @@ def build_arg_parser():
     p.add_argument("--backends", default="binary,multiclass", help="Comma-separated: binary, multiclass")
     p.add_argument("--landmark-checkpoint", default=None,
                    help="Also score a landmark-head checkpoint (best.pt from training_landmarks.yaml)")
+    p.add_argument("--keep-overhook", action="store_true",
+                   help="score against the raw bio angle (180 + theta for Overhook-flagged frames) instead of "
+                        "dropping the flag (default: truth = 180 - theta, readings folded below 180)")
     p.add_argument("--seed-pad", type=float, default=1 / 12,
                    help="Seed point height above the crop's bottom edge, as a fraction of crop height (default 1/12)")
     p.add_argument("--out-dir", default=str(_REPO_ROOT / "multi" / "results" / "angle_validation"))
@@ -294,8 +316,8 @@ def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
     sys.path.insert(0, str(_REPO_ROOT))
     os.chdir(_REPO_ROOT)                   # backends resolve weight paths relative to the repo root
-    crops_dir = Path(args.crops)
-    truth = load_truth(args.truth)
+    crops_dir = Path(args.crops).resolve()      # run_backend changes directory: a relative path would break
+    truth = load_truth(args.truth, fold=not args.keep_overhook)
     series = load_series(crops_dir / "manifest.csv", truth)
     print(f"{len(truth)} measured frames, {len(series)} seedlings, "
           f"{sum(len(v) for v in series.values())} crops to run")
@@ -304,6 +326,8 @@ def main(argv=None) -> int:
     full_preds = {}                          # reading name -> {(series, crop_id, crop_file): value}, every frame
     for name in [b.strip() for b in args.backends.split(",") if b.strip()]:
         pred = run_backend(name, series, crops_dir, args.seed_pad)
+        if not args.keep_overhook:
+            pred = fold_predictions(pred)
         rows = []
         for t in truth:
             p = pred.get((t["series"], t["crop_id"], t["crop_file"]), {})
@@ -318,6 +342,8 @@ def main(argv=None) -> int:
 
     if args.landmark_checkpoint:
         pred = run_landmarks(args.landmark_checkpoint, series, crops_dir)
+        if not args.keep_overhook:
+            pred = fold_predictions(pred)
         name = "landmark:" + Path(args.landmark_checkpoint).parent.name
         rows = []
         for t in truth:

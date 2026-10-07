@@ -11,6 +11,11 @@ from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 from PIL import Image
 import numpy as np
 
+from utils.model_download import ensure_file
+
+# The 64 MB weights are not tracked in git (docs/AUDIT.md H-6): fetched on first use, see weights_info.py
+from models.superres.weights_info import WEIGHTS_PATH, WEIGHTS_SHA256, WEIGHTS_URL
+
 
 """
 The follwoing class can either be used from other scripts or can be used directly in the terminal by giving the input path to the images, 
@@ -22,7 +27,7 @@ The output will have 4 times the res of the initial image.
 class RealesrganSuperresolution:
     #Initianlize model before prediction/image-enhancement
     def __init__(self):
-        model_path='models/superres/RealESRGAN_x4plus.pth'
+        model_path = ensure_file(WEIGHTS_PATH, WEIGHTS_URL, WEIGHTS_SHA256, 'Real-ESRGAN x4plus weights')
 
 
 

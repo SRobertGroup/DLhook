@@ -236,3 +236,97 @@ def get_backend(name=None, *, checkpoint=None, in_size=None, out_size=None, num_
 
     _BACKEND_CACHE[key] = backend
     return backend
+
+
+# --- germination time-zero ----------------------------------------------------
+#
+# Germination sets kinematic time-zero. Two methods:
+#   "learned" (default) -- utils/germination_learned.py: a per-frame classifier on the
+#       four-class model's softmax maps plus one onset per seedling. Needs no seed point.
+#       Scored on 75 unseen seedlings: 75/75 found, 71% exact, 91% within one frame.
+#   "rule" -- utils/germination_detector.py's radicle area near the operator's seed point
+#       (the previous behaviour).
+# DLHOOK_GERMINATION=rule restores the rule; the rule is also used automatically when the
+# weights file or the checkpoint it names is missing, or when the learned run fails.
+GERMINATION_ENV_VAR = "DLHOOK_GERMINATION"
+DEFAULT_GERMINATION = "learned"
+VALID_GERMINATION = ("learned", "rule")
+DEFAULT_GERMINATION_WEIGHTS = "weights/germination_detector.json"
+
+
+def resolve_germination_method(weights_path=DEFAULT_GERMINATION_WEIGHTS) -> str:
+    """'learned' or 'rule': the DLHOOK_GERMINATION env var if set (must be valid), else the
+    default -- downgraded to 'rule' when the learned detector's files are not on disk."""
+    name = os.environ.get(GERMINATION_ENV_VAR, DEFAULT_GERMINATION)
+    if name not in VALID_GERMINATION:
+        raise ValueError(f"{GERMINATION_ENV_VAR}={name!r} is not valid (expected one of {VALID_GERMINATION})")
+    if name == "learned":
+        if not os.path.exists(weights_path):
+            return "rule"
+        try:
+            from utils.germination_learned import GerminationModel
+            checkpoint = GerminationModel.load(weights_path).checkpoint or DEFAULT_MULTICLASS_CHECKPOINT
+        except (OSError, ValueError, KeyError):
+            return "rule"
+        if not os.path.exists(checkpoint):
+            return "rule"
+    return name
+
+
+class LearnedGerminationRunner:
+    """Runs the four-class model at its training geometry over one seedling's crops and returns
+    the learned onset. The softmax statistics it needs are recomputed here rather than taken from
+    the segmentation pass, so it works whichever backend segmented the crops."""
+
+    def __init__(self, weights_path=DEFAULT_GERMINATION_WEIGHTS):
+        from models.multiclass_inference import MulticlassInference
+        from utils.germination_learned import GerminationModel
+
+        self.weights_path = weights_path
+        self.model = GerminationModel.load(weights_path)
+        checkpoint = self.model.checkpoint or DEFAULT_MULTICLASS_CHECKPOINT
+        out_size = 252                       # the training geometry, as MulticlassBackend
+        self.inference = MulticlassInference(checkpoint, num_classes=4, in_size=out_size + 2 * MARGIN,
+                                             out_size=out_size, margin=MARGIN)
+
+    def visible_probs(self, image_paths):
+        """Per-frame probability that a radicle is visible; NaN for an unreadable crop."""
+        import cv2
+        from models.UNetInference import IMAGE_CHUNK
+        from utils.germination_learned import frame_features
+
+        probs = []
+        for start in range(0, len(image_paths), IMAGE_CHUNK):
+            images, ok = [], []
+            for path in image_paths[start:start + IMAGE_CHUNK]:
+                image = cv2.imread(path)
+                ok.append(image is not None)
+                if image is not None:
+                    images.append(image)
+            maps = iter(self.inference.segment_many_argmax(images, return_probs=True) if images else [])
+            for readable in ok:
+                if readable:
+                    probs.append(float(self.model.visible_probs([frame_features(next(maps))])[0]))
+                else:
+                    probs.append(float("nan"))
+        return probs
+
+    def onset(self, image_paths):
+        """(onset frame index or None, per-frame probabilities) for one seedling's crops in time order.
+        Unreadable crops are treated as 'unknown' (probability 0.5) so they never decide the onset."""
+        from utils.germination_learned import onset_or_none
+
+        probs = self.visible_probs(image_paths)
+        filled = [0.5 if p != p else p for p in probs]
+        return onset_or_none(filled), probs
+
+
+_GERMINATION_CACHE = {}
+
+
+def get_germination_runner(weights_path=DEFAULT_GERMINATION_WEIGHTS):
+    """Process-cached LearnedGerminationRunner (loads the four-class model once)."""
+    runner = _GERMINATION_CACHE.get(weights_path)
+    if runner is None:
+        runner = _GERMINATION_CACHE[weights_path] = LearnedGerminationRunner(weights_path)
+    return runner

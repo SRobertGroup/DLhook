@@ -2,15 +2,15 @@
 
 Each annotated crop has five clicks (utils/angle_annotation.py): the junction
 where the cotyledons meet the hypocotyl, two points on the hypocotyl axis and
-two on the cotyledon axis, plus an Overhook flag. They become three targets:
+two on the cotyledon axis (the CSV also has an Overhook flag, which is ignored: it is a few
+degrees past 180 deg, below the repeatability of the clicks). They become two targets:
 
 * a Gaussian HEATMAP at the junction -- the only anatomically fixed point;
 * two unit-vector FIELDS (hypocotyl, cotyledon) pointing away from the junction,
   supervised only on the pixels within `ray_width` of the ray from the junction
   to the farthest click on that axis. The axis points are "anywhere along the
   axis", so nothing outside the ray is constrained -- a point-on-axis click
-  must not become a target position;
-* an image-level OVERHOOK label.
+  must not become a target position.
 
 With a collar/root CSV (ui/root_annotator.py) a crop also gets the plant COLLAR
 (root-hypocotyl transition) as a second Gaussian heatmap and the ROOT direction as
@@ -20,9 +20,8 @@ axes. Crops without a visible radicle simply have no collar targets.
 Reading them back (`readout_from_fields`) takes the junction as the heatmap
 peak and each direction from the field at the junction, where both rays start
 and the field is guaranteed to be supervised (readout_radius <= ray_width). The
-angle is then `theta` = angle between the two directions, converted to the app's
-bio convention exactly like the annotator does (180 - theta, or 180 + theta when
-overhooked).
+angle is then `theta` = angle between the two directions, in the app's bio
+convention 180 - theta (no overhook reading).
 
 Everything here is pure numpy so it is unit-testable without torch.
 """
@@ -61,7 +60,6 @@ class Landmark:
     cotyl_dir: tuple       # unit vector, junction -> along the cotyledon, away from it
     hypo_len: float
     cotyl_len: float
-    overhook: bool
     collar: tuple | None = None      # (x, y) crop pixels; None when no radicle is annotated
     root_dir: tuple | None = None    # unit vector collar -> along the root
     root_len: float = 0.0
@@ -131,7 +129,7 @@ def load_landmarks(csv_path, exclude_filenames=(), root_csv_path=None):
                 report["invalid"] += 1
                 continue
             out[name] = Landmark(name, (row.get("series", ""), int(row["crop_id"])), j, hypo_dir,
-                                 cotyl_dir, hypo_len, cotyl_len, row.get("overhook") == "1")
+                                 cotyl_dir, hypo_len, cotyl_len)
             report["loaded"] += 1
     if root_csv_path:
         report["with_root"] = _attach_roots(out, root_csv_path)
@@ -200,3 +198,29 @@ def pad_targets_to_min(array, min_size):
     if array.ndim == 3:
         pad = [(0, 0)] + pad
     return np.pad(array, pad, mode="constant")
+
+
+def namespace_landmarks(landmarks, tag):
+    """Re-key landmarks from another crop folder as "<tag>/<crop file>", with the seedling
+    key prefixed the same way. Crop names restart in every crop folder (two folders can both
+    hold "3-crop-HR_Plate_6_IMG_12.png" for different seedlings), so a merged pool needs
+    distinct keys -- and distinct seedlings, or split_by_seedling would fuse them."""
+    out = {}
+    for name, lm in landmarks.items():
+        key = f"{tag}/{name}"
+        out[key] = replace(lm, filename=key, seedling=(f"{tag}/{lm.seedling[0]}", lm.seedling[1]))
+    return out
+
+
+def landmark_patch_rows(sizes, patch_size, stride, raw_paths):
+    """Patch-index rows (PatchDataset extra_rows) tiling whole crops that have no
+    pseudo-label mask. `sizes` is {key: (h, w)} and `raw_paths` {key: image path}; tiles
+    follow build_patch_index (pad_to_min, then _tile_origins), labels are all ignore."""
+    from .patch_index import _tile_origins
+    rows = []
+    for key in sorted(sizes):
+        h, w = sizes[key]
+        for x, y in _tile_origins(max(h, patch_size), max(w, patch_size), patch_size, stride):
+            rows.append({"filename": key, "x": str(x), "y": str(y), "patch_size": str(patch_size),
+                         "foreground_fraction": "nan", "raw_path": str(raw_paths[key]), "no_mask": "1"})
+    return rows

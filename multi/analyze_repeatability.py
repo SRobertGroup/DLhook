@@ -5,6 +5,13 @@
         --repeat-of angle_landmarks_train.csv,angle_ground_truth.csv --repeat-n 200
     python -m multi.analyze_repeatability [--original a.csv,b.csv] [--repeat angle_repeat.csv]
 
+Several rounds (each paired against its own originals -- crop names repeat across crop folders, so
+rounds from different folders must not be pooled before pairing):
+
+    python -m multi.analyze_repeatability \
+        --round "round 1 (training crops)=angle_landmarks_train.csv,angle_ground_truth.csv:angle_repeat.csv" \
+        --round "round 2 (new seedlings)=angle_new.csv:angle_repeat_new.csv" --out-dir multi/results/repeatability_all
+
 Frames are paired by (series, crop_id, frame). For the pairs measured both times it reports, in the
 app's bio convention (180 = closed, decreasing as the hook opens):
 
@@ -19,7 +26,9 @@ app's bio convention (180 = closed, decreasing as the hook opens):
 
 A model compared with ONE hand measurement cannot do better than that measurement's own error: if the
 human repeatability is about as large as the model-vs-human error, the model is at the noise floor.
-Writes pairs.csv, summary.txt and bland_altman.png into --out-dir
+The plot uses the angle the landmark validation scores, 180 - theta (overhook dropped: it is a few
+degrees past closed, below the click noise), with one colour per round. Writes pairs.csv (with a
+`round` column), summary.txt (per round, then pooled) and bland_altman.png into --out-dir
 (default multi/results/repeatability).
 """
 from __future__ import annotations
@@ -111,6 +120,7 @@ def summarise(pairs, lost, gained):
     lines.append("repeat - original (degrees, bio convention):")
     lines.append(_line("bio angle", diff_stats(ob, rb)))
     lines.append(_line("theta", diff_stats([p["orig_theta"] for p in pairs], [p["rep_theta"] for p in pairs])))
+    lines.append(_line("180 - theta", diff_stats([folded(p, "orig") for p in pairs], [folded(p, "rep") for p in pairs])))
     j = [p["junction_px"] for p in pairs]
     if j:
         lines.append(f"junction click: median distance {np.median(j):.1f} px, mean {np.mean(j):.1f}, "
@@ -130,14 +140,14 @@ def summarise(pairs, lost, gained):
 
 
 def write_pairs(path, pairs):
-    fields = ["series", "crop_id", "frame", "orig_bio", "rep_bio", "diff", "orig_theta", "rep_theta",
+    fields = ["round", "series", "crop_id", "frame", "orig_bio", "rep_bio", "diff", "orig_theta", "rep_theta",
               "orig_overhook", "rep_overhook", "junction_px"]
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
         for p in pairs:
             series, crop_id, frame = p["key"]
-            w.writerow({"series": series, "crop_id": crop_id, "frame": frame,
+            w.writerow({"round": p.get("round", ""), "series": series, "crop_id": crop_id, "frame": frame,
                         "orig_bio": f"{p['orig_bio']:.3f}", "rep_bio": f"{p['rep_bio']:.3f}",
                         "diff": f"{p['rep_bio'] - p['orig_bio']:.3f}",
                         "orig_theta": f"{p['orig_theta']:.3f}", "rep_theta": f"{p['rep_theta']:.3f}",
@@ -145,53 +155,92 @@ def write_pairs(path, pairs):
                         "junction_px": f"{p['junction_px']:.2f}"})
 
 
+def folded(pair, which):
+    """The scored angle 180 - theta (no overhook sign) of one side of a pair."""
+    return 180.0 - pair[f"{which}_theta"]
+
+
+ROUND_COLORS = ("tab:green", "tab:purple", "tab:brown", "tab:cyan")
+
+
 def plot(path, pairs):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    a = np.array([p["orig_bio"] for p in pairs])
-    b = np.array([p["rep_bio"] for p in pairs])
-    over = np.array([p["orig_overhook"] or p["rep_overhook"] for p in pairs], dtype=bool)
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
+    rounds = list(dict.fromkeys(p.get("round", "") for p in pairs))
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 5))
+    x = np.linspace(0, 185, 2)
+    axes[0].fill_between(x, x - 10, x + 10, color="grey", alpha=0.15, lw=0, label="+-10 deg")
+    axes[0].plot(x, x, color="grey", lw=0.8)
+    for k, name in enumerate(rounds):
+        sel = [p for p in pairs if p.get("round", "") == name]
+        a = np.array([folded(p, "orig") for p in sel])
+        b = np.array([folded(p, "rep") for p in sel])
+        st = diff_stats(a, b)
+        color = ROUND_COLORS[k % len(ROUND_COLORS)]
+        label = (f"{name}: " if name else "") + f"n={st['n']}, median |d| {st.get('median', float('nan')):.1f}"
+        axes[0].scatter(a, b, s=14, alpha=0.65, color=color, edgecolor="none", label=label)
+        axes[1].scatter((a + b) / 2, b - a, s=14, alpha=0.65, color=color, edgecolor="none")
     ax = axes[0]
-    ax.plot([0, 240], [0, 240], color="grey", lw=0.8)
-    ax.scatter(a[~over], b[~over], s=14, alpha=0.7, label="not overhooked")
-    ax.scatter(a[over], b[over], s=22, marker="D", color="tab:red", alpha=0.8, label="overhooked either time")
-    ax.set_xlabel("first measurement (deg)")
-    ax.set_ylabel("repeat measurement (deg)")
-    ax.set_xlim(0, 240)
-    ax.set_ylim(0, 240)
+    ax.set_xlabel("first measurement, 180 - theta (deg)")
+    ax.set_ylabel("blind repeat, 180 - theta (deg)")
+    ax.set_xlim(0, 185)
+    ax.set_ylim(0, 185)
     ax.set_aspect("equal")
     ax.legend(fontsize=8, loc="upper left")
-    ax.set_title(f"repeat vs original, n={len(a)}")
-    ax = axes[1]
-    mean, diff = (a + b) / 2, b - a
+    ax.set_title(f"repeat vs original, n={len(pairs)}")
+    a = np.array([folded(p, "orig") for p in pairs])
+    b = np.array([folded(p, "rep") for p in pairs])
     s = diff_stats(a, b)
-    ax.scatter(mean, diff, s=14, alpha=0.7)
+    ax = axes[1]
     for y, style in ((s["bias"], "-"), (s["loa_low"], "--"), (s["loa_high"], "--")):
         ax.axhline(y, color="tab:red", ls=style, lw=1)
     ax.axhline(0, color="grey", lw=0.6)
     ax.set_xlabel("mean of the two measurements (deg)")
     ax.set_ylabel("repeat - original (deg)")
-    ax.set_title(f"Bland-Altman: bias {s['bias']:+.1f}, limits [{s['loa_low']:+.0f}, {s['loa_high']:+.0f}]")
+    ax.set_title(f"Bland-Altman (all rounds): bias {s['bias']:+.1f}, "
+                 f"95% limits [{s['loa_low']:+.0f}, {s['loa_high']:+.0f}]")
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
+
+
+def parse_round(text):
+    """'label=orig1.csv,orig2.csv:repeat.csv' (label optional) -> (label, [originals], repeat)."""
+    label, _, rest = text.rpartition("=")
+    originals, sep, repeat = rest.rpartition(":")
+    if not sep or not originals:
+        raise SystemExit(f"--round {text!r}: expected 'label=orig.csv[,orig2.csv]:repeat.csv'")
+    return label.strip(), [x.strip() for x in originals.split(",") if x.strip()], repeat.strip()
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--original", default=",".join(str(_REPO_ROOT / n) for n in DEFAULT_ORIGINALS))
     p.add_argument("--repeat", default=str(_REPO_ROOT / "angle_repeat.csv"))
+    p.add_argument("--round", action="append", default=None, metavar="LABEL=ORIG[,ORIG]:REPEAT",
+                   help="one repeat round, paired against its own originals (repeatable; replaces "
+                        "--original/--repeat)")
     p.add_argument("--out-dir", default=str(DEFAULT_OUT))
     args = p.parse_args(argv)
-    originals = load_rows([x.strip() for x in args.original.split(",") if x.strip()])
-    repeats = load_rows([args.repeat])
-    pairs, lost, gained = pair_up(originals, repeats)
+    rounds = ([parse_round(r) for r in args.round] if args.round else
+              [("", [x.strip() for x in args.original.split(",") if x.strip()], args.repeat)])
+    pairs, lost, gained, sections = [], 0, 0, []
+    for label, originals, repeat in rounds:
+        r_pairs, r_lost, r_gained = pair_up(load_rows(originals), load_rows([repeat]))
+        for pr in r_pairs:
+            pr["round"] = label
+        pairs += r_pairs
+        lost += r_lost
+        gained += r_gained
+        if len(rounds) > 1:
+            sections.append(f"=== {label or repeat}" + "\n" + summarise(r_pairs, r_lost, r_gained))
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     text = summarise(pairs, lost, gained)
+    if sections:
+        text = "\n\n".join(sections + ["=== all rounds pooled" + "\n" + text])
     print(text)
     (out / "summary.txt").write_text(text + "\n", encoding="utf-8")
     if pairs:

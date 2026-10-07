@@ -61,12 +61,14 @@ cd DLhook
 >
 > For more on setting up conda, see the [conda user guide](https://conda.io/projects/conda/en/latest/user-guide/install).
 
-The maintained path is the environment file, which pins Python 3.10 and a CUDA-enabled PyTorch:
+The maintained path is the environment file, which pins Python 3.10 and installs the pinned packages of `requirements.txt` with a CUDA 12.8 build of PyTorch. Run it from the repository root:
 
 ```bash
 mamba env create -f env.yaml
 mamba activate dlhook_env
 ```
+
+Every package has an exact version. `requirements-lock.txt` pins the full environment, transitive packages included (`pip install -r requirements-lock.txt` reproduces it), and `requirements-dev.txt` adds `pytest`.
 
 <details>
 <summary>Alternative: build the environment by hand</summary>
@@ -76,26 +78,24 @@ mamba create -n dlhook_env python=3.10 -y
 mamba activate dlhook_env
 ```
 
-For **GPU** (CUDA), install a CUDA build of PyTorch first, then the rest:
+For **GPU** (CUDA), take PyTorch from the PyTorch index. The pins match the `2.8.0+cu128` build; use `cu126` for an older driver:
 
 ```bash
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip3 install --no-cache-dir -r requirements.txt
+pip3 install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu128 -r requirements.txt
 ```
 
 For **CPU only**:
 
 ```bash
-pip3 install torch torchvision torchaudio
 pip3 install --no-cache-dir -r requirements.txt
 ```
 
 </details>
 
-Dependencies (see [`requirements.txt`](requirements.txt) and [`env.yaml`](env.yaml)): `torch`, `torchvision`, `torchaudio`, `realesrgan`, `opencv-python`, `scikit-image`, `pandas`, `matplotlib`, `pillow`.
+Dependencies, all pinned (see [`requirements.txt`](requirements.txt) and [`env.yaml`](env.yaml)): `torch`, `torchvision`, `numpy`, `pandas`, `pillow`, `matplotlib`, `scikit-image`, `opencv-python`, `PyYAML`, `tqdm`, `basicsr` and `realesrgan`.
 
 > [!TIP]
-> A GPU is optional but strongly recommended — segmentation is roughly **8× faster** on CUDA. Match the CUDA version to your driver; `env.yaml` requests CUDA 12.4, but newer builds work and are needed for recent GPU generations. Super-resolution of the crops only runs when CUDA is available.
+> A GPU is optional but strongly recommended — segmentation is roughly **8× faster** on CUDA. Match the CUDA version to your driver; `env.yaml` installs the CUDA 12.8 build, which recent GPU generations (Blackwell) need; change `cu128` to `cu126` for an older driver. Super-resolution of the crops only runs when CUDA is available.
 
 ### 3. Start DLhook
 

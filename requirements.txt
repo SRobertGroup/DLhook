@@ -1,9 +1,19 @@
-realesrgan
-pandas
-opencv-python
-scikit-image
-matplotlib
-pillow
-torch
-torchvision
-torchaudio
+# DLhook runtime dependencies, pinned to the versions of the working environment (Python 3.10).
+# Install with a CUDA build of PyTorch from the PyTorch index (use cu126 for an older driver):
+#   pip install --extra-index-url https://download.pytorch.org/whl/cu128 -r requirements.txt
+# CPU only: drop --extra-index-url. `torch==2.8.0` also matches the `2.8.0+cu128` build.
+# requirements-lock.txt pins every package of that environment, transitive ones included.
+# Keep torch / torchvision in step with the torchvision.transforms.functional_tensor shim in
+# seedling_measurment.py: a torchvision update already broke startup once.
+torch==2.8.0
+torchvision==0.23.0
+numpy==2.2.6
+pandas==2.3.3
+pillow==10.4.0
+matplotlib==3.10.9
+scikit-image==0.25.2
+opencv-python==5.0.0.93
+PyYAML==6.0.3
+tqdm==4.70.0
+basicsr==1.4.2
+realesrgan==0.3.0

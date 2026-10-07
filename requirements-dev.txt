@@ -1,0 +1,3 @@
+# Runtime dependencies plus what the test suite needs (CI uses requirements-ci.txt, CPU torch).
+-r requirements.txt
+pytest==9.1.1

@@ -1,0 +1,21 @@
+# Normalise line endings (audit L-5): text files are stored with LF in the repository.
+# Existing files keep their current endings until the next `git add --renormalize .`, best run
+# on its own in a clean commit so it does not hide real changes.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files: never diffed or converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.tif binary
+*.tiff binary
+*.gif binary
+*.pdf binary
+*.pptx binary
+*.pt binary
+*.pkl binary
+*.pth binary
+*.h5 binary
+*.npz binary

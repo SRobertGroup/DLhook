@@ -6,7 +6,7 @@ using the three shipped binary RootPainter models. A later stage
 multiclass labels; this script's only job is to write them.
 
 This is a data-prep CLI, run from the dlhook_env (needs cv2/numpy/torch).
-It imports models/UNetInference.py directly (not seedling_measurment.py/ui/*,
+It imports models/UNetInference.py directly (not seedling_measurement.py/ui/*,
 which construct Tk widgets and load CUDA/superres models at import time).
 
 ========================================================================
@@ -74,7 +74,7 @@ import numpy as np
 # multi/ on sys.path so `from src...` resolves to multi/src (matches
 # multi/recrop_plates.py's convention); the repo root on sys.path so
 # `models.UNetInference` is importable without importing
-# seedling_measurment.py itself.
+# seedling_measurement.py itself.
 _MULTI_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _MULTI_DIR.parent
 sys.path.insert(0, str(_MULTI_DIR))

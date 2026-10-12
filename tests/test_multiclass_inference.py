@@ -264,7 +264,7 @@ def test_segment_many_argmax_return_probs_matches_its_own_argmax():
     assert np.all(labels[0] == 2)
 
 
-def test_predict_files_labelmaps_skips_unreadable_paths_like_predict_files(tmp_path, capsys):
+def test_predict_files_labelmaps_skips_unreadable_paths_like_predict_files(tmp_path, caplog):
     """MulticlassBackend (models/segmentation_backends.py) routes an
     unreadable image through predict_files_labelmaps exactly the same way
     BinaryBackend routes it through UNetInference.predict_files -- same
@@ -287,5 +287,4 @@ def test_predict_files_labelmaps_skips_unreadable_paths_like_predict_files(tmp_p
     assert set(label_maps.keys()) == {"0-crop-good.png"}
     assert label_maps["0-crop-good.png"].shape == (20, 20)
 
-    captured = capsys.readouterr()
-    assert f"[WARNING] Could not load: {bad_path}" in captured.out
+    assert any(r.levelname == "WARNING" and f"Could not load: {bad_path}" in r.getMessage() for r in caplog.records)

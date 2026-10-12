@@ -1,17 +1,19 @@
 """Which segmentation models actually run underneath the GUI pipeline.
 
-Today (and until a later, separately-gated step flips it) that is always
-three independent binary RootPainter checkpoints -- cotyledon_v5.pkl,
+The default is now the 4-class MulticlassBackend (labels "1", "2", plus a
+binary hypocot_v5 mask under "hypocotyl_binary"); the legacy path
+(DLHOOK_SEG_BACKEND=binary) is three independent binary RootPainter
+checkpoints -- cotyledon_v5.pkl,
 hypocot_v5.pkl, germ_v1.pkl, feeding labels "1", "2", "4" respectively. That
 exact three-model sequence used to be duplicated almost verbatim at two call
-sites in seedling_measurment.py (run_apical_pipeline and
+sites in seedling_measurement.py (run_apical_pipeline and
 segment_single_seedling) and had already drifted apart once. This module
 gives it one place to live, `BinaryBackend.predict_into`, so both call sites
 can eventually delegate to the same code instead of maintaining their own
 copies.
 
 Both GUI call sites now route here through `Gui._segment_paths`
-(seedling_measurment.py), so this module is the only place a weight file is
+(seedling_measurement.py), so this module is the only place a weight file is
 named. `MulticlassBackend` (one 4-class checkpoint standing in for all three
 binary models) is also implemented here, but only reachable by explicitly
 setting DLHOOK_SEG_BACKEND=multiclass -- flipping DEFAULT_BACKEND to it is a
@@ -20,18 +22,22 @@ runtime behaviour is exactly what it was before the routing change.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 import numpy as np
 
 from models.UNetInference import MARGIN, get_predictor
+from utils.paths import repo_path
+
+log = logging.getLogger(__name__)
 
 # DLHOOK_SEG_BACKEND env var name, and the backend names it (and get_backend)
-# accept. Keep DEFAULT_BACKEND "binary" until the multiclass backend is
-# implemented and proven out -- flipping this is a later, separately-gated
-# step, not this one.
+# accept. "multiclass" is the default; "binary" is the legacy three-model path
+# (DLHOOK_SEG_BACKEND=binary), also used automatically when the default
+# multiclass checkpoint is not on disk (see resolve_backend_name).
 ENV_VAR = "DLHOOK_SEG_BACKEND"
-DEFAULT_BACKEND = "binary"
+DEFAULT_BACKEND = "multiclass"
 VALID_BACKENDS = ("binary", "multiclass")
 
 # Default 4-class checkpoint MulticlassBackend loads when the caller does not
@@ -45,20 +51,48 @@ DEFAULT_MULTICLASS_CHECKPOINT = "weights/multiclass/dlhook_4class_v1.pt"
 # reads a "background" label.
 _CLASS_TO_LABEL = {1: "1", 2: "2", 3: "4"}
 
+# Mask-store label for the binary hypocot_v5 mask that MulticlassBackend writes
+# beside its own "2" (the multiclass hypocotyl is cut in half; hypocotyl traits
+# read this one).
+HYPOCOTYL_BINARY_LABEL = "hypocotyl_binary"
+
 
 def resolve_backend_name() -> str:
     """The backend name to use: the `DLHOOK_SEG_BACKEND` env var if set
     (must be one of VALID_BACKENDS), else DEFAULT_BACKEND. Raises a clear
     ValueError on an unrecognised env var value rather than silently falling
     back, so a typo'd env var fails loudly instead of quietly running the
-    wrong model."""
-    name = os.environ.get(ENV_VAR, DEFAULT_BACKEND)
+    wrong model.
+
+    When the env var is NOT set and the default (multiclass) checkpoint is
+    missing on disk, falls back to "binary" with a [WARNING] so a fresh
+    checkout still runs. An explicit DLHOOK_SEG_BACKEND=multiclass is never
+    downgraded: it errors at load, as before."""
+    explicit = os.environ.get(ENV_VAR)
+    name = explicit if explicit is not None else DEFAULT_BACKEND
     if name not in VALID_BACKENDS:
         raise ValueError(
             f"{ENV_VAR}={name!r} is not a valid segmentation backend "
             f"(expected one of {VALID_BACKENDS})"
         )
+    if explicit is None and name == "multiclass" and not os.path.exists(repo_path(DEFAULT_MULTICLASS_CHECKPOINT)):
+        _warn_once(
+            "seg-backend",
+            f"Default multiclass checkpoint {DEFAULT_MULTICLASS_CHECKPOINT} not found; "
+            f"falling back to the legacy binary segmentation models.",
+        )
+        return "binary"
     return name
+
+
+_WARNED = set()
+
+
+def _warn_once(key, message):
+    """Print `message` the first time `key` is seen in this process."""
+    if key not in _WARNED:
+        _WARNED.add(key)
+        log.warning(message)
 
 
 class BinaryBackend:
@@ -108,9 +142,11 @@ class BinaryBackend:
 class MulticlassBackend:
     """One 4-class checkpoint whose argmax output populates the same three
     labels ("1"/"2"/"4") that BinaryBackend gets from three separate models.
-    DEFAULT_BACKEND stays "binary" until a later, separately-gated step
-    flips it -- this backend is reachable only via
-    DLHOOK_SEG_BACKEND=multiclass until then.
+    This is the default backend (DEFAULT_BACKEND). It writes "1"/"2" from the
+    argmax; label "4" depends on `radicle_source` ("none" by default: germination
+    comes from the learned detector, so no radicle mask is stored; "multiclass"
+    stores argmax class 3 under "4"). With `hypocotyl_binary` (default True) it
+    also runs the binary hypocot_v5 model into HYPOCOTYL_BINARY_LABEL.
 
     Geometry is pinned to the checkpoint's own training patch size, NOT the
     GUI's default 572/560/6 (UNetInference.IN_SIZE/OUT_SIZE/MARGIN): the
@@ -128,7 +164,16 @@ class MulticlassBackend:
     into get_backend's _BACKEND_CACHE key.
     """
 
-    def __init__(self, checkpoint=None, *, in_size=None, out_size=None, num_classes=None):
+    RADICLE_SOURCES = ("none", "multiclass")
+
+    def __init__(self, checkpoint=None, *, in_size=None, out_size=None, num_classes=None,
+                 radicle_source="none", hypocotyl_binary=True):
+        if radicle_source not in self.RADICLE_SOURCES:
+            raise ValueError(
+                f"radicle_source={radicle_source!r} is not valid (expected one of {self.RADICLE_SOURCES})"
+            )
+        self.radicle_source = radicle_source
+        self.hypocotyl_binary = bool(hypocotyl_binary)
         self.checkpoint = checkpoint or DEFAULT_MULTICLASS_CHECKPOINT
         self.out_size = out_size if out_size is not None else 252
         self.in_size = in_size if in_size is not None else self.out_size + 2 * MARGIN
@@ -188,11 +233,20 @@ class MulticlassBackend:
         label_maps = predictor.predict_files_labelmaps(image_paths)
 
         for class_index, label in _CLASS_TO_LABEL.items():
+            if label == "4" and self.radicle_source != "multiclass":
+                continue            # no radicle mask: written nowhere, by design
             masks_by_filename = {
                 file_name: (label_map == class_index).astype(np.uint8) * 255
                 for file_name, label_map in label_maps.items()
             }
             mask_store.put_raw_bulk(masks_by_filename, label)
+
+        if self.hypocotyl_binary:
+            # Same weights BinaryBackend uses for label "2" (reused, not re-named here).
+            hypocotyl_weights = dict(BinaryBackend.WEIGHTS)["2"]
+            predictor = get_predictor(hypocotyl_weights)
+            masks_by_filename = predictor.predict_files(image_paths, label="2")
+            mask_store.put_raw_bulk(masks_by_filename, HYPOCOTYL_BINARY_LABEL)
 
 
 # Process-wide cache of backend instances. Deliberately its OWN cache, not a
@@ -207,22 +261,23 @@ class MulticlassBackend:
 _BACKEND_CACHE = {}
 
 
-def get_backend(name=None, *, checkpoint=None, in_size=None, out_size=None, num_classes=None):
+def get_backend(name=None, *, checkpoint=None, in_size=None, out_size=None, num_classes=None,
+                radicle_source="none", hypocotyl_binary=True):
     """Return a process-cached backend instance for `name` (defaulting to
     `resolve_backend_name()`), constructing it only on first request for
-    this exact `(name, checkpoint, in_size, out_size, num_classes)` key.
-    `checkpoint`/`in_size`/`out_size`/`num_classes` are unused by
-    BinaryBackend (it has no checkpoint or configurable geometry) but are
-    accepted and folded into the cache key regardless, so the identical call
-    signature also serves MulticlassBackend, whose checkpoint/geometry
-    default to None meaning "use MulticlassBackend's own defaults" -- see its
-    __init__."""
+    this exact `(name, checkpoint, in_size, out_size, num_classes,
+    radicle_source, hypocotyl_binary)` key.
+    These arguments are unused by BinaryBackend (it has no checkpoint,
+    configurable geometry or options) but are accepted and folded into the
+    cache key regardless, so the identical call signature also serves
+    MulticlassBackend, whose checkpoint/geometry default to None meaning "use
+    MulticlassBackend's own defaults" -- see its __init__."""
     if name is None:
         name = resolve_backend_name()
     elif name not in VALID_BACKENDS:
         raise ValueError(f"Unknown segmentation backend {name!r} (expected one of {VALID_BACKENDS})")
 
-    key = (name, checkpoint, in_size, out_size, num_classes)
+    key = (name, checkpoint, in_size, out_size, num_classes, radicle_source, bool(hypocotyl_binary))
     backend = _BACKEND_CACHE.get(key)
     if backend is not None:
         return backend
@@ -231,7 +286,8 @@ def get_backend(name=None, *, checkpoint=None, in_size=None, out_size=None, num_
         backend = BinaryBackend()
     else:
         backend = MulticlassBackend(
-            checkpoint, in_size=in_size, out_size=out_size, num_classes=num_classes
+            checkpoint, in_size=in_size, out_size=out_size, num_classes=num_classes,
+            radicle_source=radicle_source, hypocotyl_binary=hypocotyl_binary,
         )
 
     _BACKEND_CACHE[key] = backend
@@ -261,14 +317,14 @@ def resolve_germination_method(weights_path=DEFAULT_GERMINATION_WEIGHTS) -> str:
     if name not in VALID_GERMINATION:
         raise ValueError(f"{GERMINATION_ENV_VAR}={name!r} is not valid (expected one of {VALID_GERMINATION})")
     if name == "learned":
-        if not os.path.exists(weights_path):
+        if not os.path.exists(repo_path(weights_path)):
             return "rule"
         try:
             from utils.germination_learned import GerminationModel
             checkpoint = GerminationModel.load(weights_path).checkpoint or DEFAULT_MULTICLASS_CHECKPOINT
         except (OSError, ValueError, KeyError):
             return "rule"
-        if not os.path.exists(checkpoint):
+        if not os.path.exists(repo_path(checkpoint)):
             return "rule"
     return name
 
@@ -329,4 +385,90 @@ def get_germination_runner(weights_path=DEFAULT_GERMINATION_WEIGHTS):
     runner = _GERMINATION_CACHE.get(weights_path)
     if runner is None:
         runner = _GERMINATION_CACHE[weights_path] = LearnedGerminationRunner(weights_path)
+    return runner
+
+
+# --- angle source -------------------------------------------------------------
+#
+# Where the per-frame hook angle comes from:
+#   "landmarks" (default) -- a landmark-head ensemble (junction + direction fields), read at the
+#       training geometry; validated far closer to hand measurements than the ellipse fit.
+#   "ellipse" -- the legacy cotyledon/hypocotyl ellipse geometry (utils/apicalhook_angle.py).
+# DLHOOK_ANGLE_SOURCE=ellipse restores the legacy path; it is also used automatically (with a
+# warning) when any landmark checkpoint is missing.
+ANGLE_SOURCE_ENV = "DLHOOK_ANGLE_SOURCE"
+DEFAULT_ANGLE_SOURCE = "landmarks"
+VALID_ANGLE_SOURCES = ("landmarks", "ellipse")
+# "+"-joined spec, the syntax LandmarkEnsemble.from_checkpoints takes.
+DEFAULT_LANDMARK_CHECKPOINTS = (
+    "weights/landmarks/dlhook_landmarks_a.pt"
+    "+weights/landmarks/dlhook_landmarks_b.pt"
+    "+weights/landmarks/dlhook_landmarks_c.pt"
+)
+
+
+def _checkpoint_paths(spec):
+    return [p.strip() for p in spec.split("+") if p.strip()]
+
+
+def resolve_angle_source(checkpoints=DEFAULT_LANDMARK_CHECKPOINTS) -> str:
+    """'landmarks' or 'ellipse': the DLHOOK_ANGLE_SOURCE env var if set (must be valid), else the
+    default -- downgraded to 'ellipse' (with a warning) when any checkpoint of the spec is missing."""
+    name = os.environ.get(ANGLE_SOURCE_ENV, DEFAULT_ANGLE_SOURCE)
+    if name not in VALID_ANGLE_SOURCES:
+        raise ValueError(f"{ANGLE_SOURCE_ENV}={name!r} is not valid (expected one of {VALID_ANGLE_SOURCES})")
+    if name == "landmarks":
+        missing = [p for p in _checkpoint_paths(checkpoints) if not os.path.exists(repo_path(p))]
+        if missing:
+            _warn_once(
+                "angle-source",
+                f"Landmark checkpoint(s) not found ({', '.join(missing)}); "
+                f"falling back to the legacy ellipse angle source.",
+            )
+            return "ellipse"
+    return name
+
+
+class LandmarkRunner:
+    """Reads landmarks (junction, directions, hook angle) from crop files with the landmark
+    ensemble at the training geometry (out_size=252, in_size=252+2*MARGIN, as MulticlassBackend),
+    not the 572 default. The model loads on first use, not in __init__, so resolving a runner
+    never costs a checkpoint load. Flip TTA stays at its default (on)."""
+
+    def __init__(self, checkpoints=DEFAULT_LANDMARK_CHECKPOINTS):
+        self.checkpoints = checkpoints
+        self.out_size = 252
+        self.in_size = self.out_size + 2 * MARGIN
+        self.margin = MARGIN
+        self.num_classes = 4
+        self._model = None
+
+    def _get_model(self):
+        if self._model is None:
+            # Imported here so importing this module never pulls in torch.
+            from models.multiclass_inference import LandmarkEnsemble
+
+            # A single path gives a plain MulticlassInference; both have predict_files_landmarks.
+            self._model = LandmarkEnsemble.from_checkpoints(
+                self.checkpoints,
+                num_classes=self.num_classes,
+                in_size=self.in_size,
+                out_size=self.out_size,
+                margin=self.margin,
+            )
+        return self._model
+
+    def predict_paths(self, image_paths):
+        """{basename: readout dict or None}; unreadable files are absent."""
+        return self._get_model().predict_files_landmarks(list(image_paths))
+
+
+_LANDMARK_CACHE = {}
+
+
+def get_landmark_runner(checkpoints=DEFAULT_LANDMARK_CHECKPOINTS):
+    """Process-cached LandmarkRunner (the ensemble loads once, on first predict_paths)."""
+    runner = _LANDMARK_CACHE.get(checkpoints)
+    if runner is None:
+        runner = _LANDMARK_CACHE[checkpoints] = LandmarkRunner(checkpoints)
     return runner

@@ -39,8 +39,9 @@ from .config import ensure_repo_root_importable
 ensure_repo_root_importable()
 
 from utils.angle_annotation import orient_axis  # noqa: E402
+from utils.angle_review import read_rows  # noqa: E402
 from utils.landmark_readout import (  # noqa: E402,F401  (re-exported: pure readout lives in utils/)
-    PEAK_FOUND, READOUT_RADIUS, bio_from_theta, readout_from_fields, theta_between,
+    PEAK_FOUND, READOUT_RADIUS, bio_from_theta, readout_from_fields, rays_cross, theta_between,
 )
 
 HM_SIGMA = 3.0
@@ -49,6 +50,7 @@ MIN_RAY_LENGTH = 8.0
 PEAK_PRESENT = 0.5        # a rendered/predicted junction counts as "in the patch" above this
 KP_CHANNELS = 5           # 1 junction logit + 2 x (x, y) direction fields
 KP_CHANNELS_ROOT = 8      # + 1 collar logit + (x, y) root direction field
+KP_CHANNELS_COTYL = 10    # + cotyledon base and tip heatmap logits
 
 
 @dataclass(frozen=True)
@@ -63,10 +65,21 @@ class Landmark:
     collar: tuple | None = None      # (x, y) crop pixels; None when no radicle is annotated
     root_dir: tuple | None = None    # unit vector collar -> along the root
     root_len: float = 0.0
+    cotyl_base: tuple | None = None  # (x, y) the cotyledon click nearer the junction
+    cotyl_tip: tuple | None = None   # (x, y) the farther one: the cotyledon tip, or the midpoint between the tips
 
     @property
     def theta(self) -> float:
         return theta_between(self.hypo_dir, self.cotyl_dir)
+
+    @property
+    def overhook(self) -> bool:
+        """The clicked cotyledon axis (base -> tip) crosses the clicked hypocotyl axis (junction -> away)."""
+        if self.cotyl_base is None or self.cotyl_tip is None:
+            return False
+        along = np.asarray(self.cotyl_tip, float) - np.asarray(self.cotyl_base, float)
+        n = float(np.hypot(*along))
+        return n > 1e-6 and rays_cross(self.cotyl_base, along / n, self.junction, self.hypo_dir)
 
 
 def _ray(junction, p1, p2):
@@ -112,25 +125,27 @@ def load_landmarks(csv_path, exclude_filenames=(), root_csv_path=None):
     the crops it covers; report["with_root"] counts them."""
     exclude = set(exclude_filenames)
     out, report = {}, {"loaded": 0, "excluded": 0, "invalid": 0}
-    with open(csv_path, newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            if row.get("status") != "measured":
-                continue
-            name = row["crop_file"]
-            if name in exclude:
-                report["excluded"] += 1
-                continue
-            try:
-                pt = lambda p: (float(row[f"{p}_x"]), float(row[f"{p}_y"]))
-                j = pt("junction")
-                hypo_dir, hypo_len = _ray(j, pt("hypo1"), pt("hypo2"))
-                cotyl_dir, cotyl_len = _ray(j, pt("cotyl1"), pt("cotyl2"))
-            except (ValueError, KeyError):
-                report["invalid"] += 1
-                continue
-            out[name] = Landmark(name, (row.get("series", ""), int(row["crop_id"])), j, hypo_dir,
-                                 cotyl_dir, hypo_len, cotyl_len)
-            report["loaded"] += 1
+    for row in read_rows(csv_path):                         # the review sidecar is applied
+        if row.get("status") != "measured":
+            continue
+        name = row["crop_file"]
+        if name in exclude:
+            report["excluded"] += 1
+            continue
+        try:
+            pt = lambda p: (float(row[f"{p}_x"]), float(row[f"{p}_y"]))
+            j = pt("junction")
+            hypo_dir, hypo_len = _ray(j, pt("hypo1"), pt("hypo2"))
+            cotyl_dir, cotyl_len = _ray(j, pt("cotyl1"), pt("cotyl2"))
+        except (ValueError, KeyError):
+            report["invalid"] += 1
+            continue
+        c1, c2 = pt("cotyl1"), pt("cotyl2")
+        near_first = math.hypot(c1[0] - j[0], c1[1] - j[1]) <= math.hypot(c2[0] - j[0], c2[1] - j[1])
+        base, tip = (c1, c2) if near_first else (c2, c1)
+        out[name] = Landmark(name, (row.get("series", ""), int(row["crop_id"])), j, hypo_dir,
+                             cotyl_dir, hypo_len, cotyl_len, cotyl_base=base, cotyl_tip=tip)
+        report["loaded"] += 1
     if root_csv_path:
         report["with_root"] = _attach_roots(out, root_csv_path)
     return out, report
@@ -182,8 +197,16 @@ def render_targets(h, w, lm: Landmark, sigma=HM_SIGMA, ray_width=RAY_WIDTH):
         root_valid[0][on_ray] = 1.0
         root_vec[0][on_ray] = u[0]
         root_vec[1][on_ray] = u[1]
+    base_hm = np.zeros((h, w), np.float32)
+    tip_hm = np.zeros((h, w), np.float32)
+    if lm.cotyl_base is not None and lm.cotyl_tip is not None:
+        bx, by = lm.cotyl_base
+        tx, ty = lm.cotyl_tip
+        base_hm = np.exp(-((px - bx) ** 2 + (py - by) ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
+        tip_hm = np.exp(-((px - tx) ** 2 + (py - ty) ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
     return {"hm": hm, "paf": paf, "paf_valid": valid,
-            "collar_hm": collar_hm, "root_vec": root_vec, "root_valid": root_valid}
+            "collar_hm": collar_hm, "root_vec": root_vec, "root_valid": root_valid,
+            "base_hm": base_hm, "tip_hm": tip_hm}
 
 
 def pad_targets_to_min(array, min_size):
@@ -198,6 +221,26 @@ def pad_targets_to_min(array, min_size):
     if array.ndim == 3:
         pad = [(0, 0)] + pad
     return np.pad(array, pad, mode="constant")
+
+
+ANGLE_BIN_EDGES = (45.0, 135.0)     # theta (angle between the axes): closed < 45 <= middle < 135 <= open
+
+
+def angle_bin(theta, edges=ANGLE_BIN_EDGES):
+    return sum(theta >= e for e in edges)
+
+
+def angle_balanced_weights(landmarks, edges=ANGLE_BIN_EDGES):
+    """{crop file: weight} that give each angle bin (closed / middle / open hook) the same total
+    weight, the mean weight being 1. Annotated frames are mostly closed hooks; drawing all of them
+    equally often makes the rare open ones count for little, and oversampling the open ones alone
+    costs the closed ones (run 9). Bins with no frame are ignored."""
+    bins = {name: angle_bin(lm.theta, edges) for name, lm in landmarks.items()}
+    counts = {}
+    for b in bins.values():
+        counts[b] = counts.get(b, 0) + 1
+    n, k = len(bins), len(counts)
+    return {name: n / (k * counts[b]) for name, b in bins.items()} if n else {}
 
 
 def namespace_landmarks(landmarks, tag):

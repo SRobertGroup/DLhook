@@ -26,7 +26,7 @@ The remaining structural explanation is a train/evaluate DOMAIN mismatch:
   they are in-domain there and the student is not;
 - CURRENT PRODUCTION geometry is the tight per-seedling crop: the bounding box
   of the user's two clicks, padded 40% horizontally and 10% vertically, cut at
-  native resolution with no resize (`seedling_measurment.py`, mirrored by
+  native resolution with no resize (`seedling_measurement.py`, mirrored by
   `multi/src/recrop_geometry.compute_crop_box`) -- the same geometry family as
   `cropped_training_set/`.
 

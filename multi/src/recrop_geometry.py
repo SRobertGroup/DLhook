@@ -1,29 +1,34 @@
 """Crop-box geometry shared by the headless plate re-cropper (recrop_plates.py).
 
-This intentionally duplicates (rather than imports) the small amount of
-geometry from seedling_measurment.py's `_compute_crop_box` /
-`start_analysis` crop loop: that module constructs Tk widgets and loads
-CUDA/superres models at import time, which is exactly what a headless,
-GPU-optional batch script must avoid pulling in. Keeping the two in sync is a
-matter of re-reading seedling_measurment.py when either changes -- see
-CLAUDE.md's crop-box padding constants (`crop_padding_width_fraction`,
-`crop_padding_height_fraction`, `min_box_half_size`), which this mirrors
-exactly.
+compute_crop_box and its padding constants live in utils/crop_layout.py (the one definition used
+by the main window's box canvas and by the manual crop-drawing tool); they are re-exported here.
+The rest (crop_from_box, file listing, output naming) mirrors seedling_measurement.py's
+start_analysis crop loop without importing that module, which constructs Tk widgets and loads
+CUDA models at import time -- exactly what a headless batch script must avoid.
 """
 from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import Optional
 
 import numpy as np
 
-# Mirrors seedling_measurment.py's Gui.__init__ defaults exactly.
-DEFAULT_PADDING_WIDTH_FRACTION = 0.4
-DEFAULT_PADDING_HEIGHT_FRACTION = 0.10
-DEFAULT_MIN_BOX_HALF_SIZE = 30
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:      # some multi/ scripts import this before putting the repo root on sys.path
+    sys.path.insert(0, _REPO_ROOT)
 
-# Mirrors seedling_measurment.py's VALID_IMAGE_EXTENSIONS. Extensions are
+# The box geometry now lives in utils/crop_layout.py (the GUI imports it from there and must
+# not import multi/); these names are re-exported so existing importers keep working.
+from utils.crop_layout import (  # noqa: E402,F401
+    DEFAULT_MIN_BOX_HALF_SIZE,
+    DEFAULT_PADDING_HEIGHT_FRACTION,
+    DEFAULT_PADDING_WIDTH_FRACTION,
+    compute_crop_box,
+)
+
+# Mirrors seedling_measurement.py's VALID_IMAGE_EXTENSIONS. Extensions are
 # matched case-insensitively (Camera_1 uses ".jpg", Highres_EMS_* uses
 # ".JPG", simpler_AGJKV uses ".TIF").
 VALID_IMAGE_EXTENSIONS = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp")
@@ -31,45 +36,9 @@ VALID_IMAGE_EXTENSIONS = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp")
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
-def compute_crop_box(
-    min_x: float,
-    max_x: float,
-    min_y: float,
-    max_y: float,
-    padding_width_fraction: float = DEFAULT_PADDING_WIDTH_FRACTION,
-    padding_height_fraction: float = DEFAULT_PADDING_HEIGHT_FRACTION,
-    min_box_half_size: float = DEFAULT_MIN_BOX_HALF_SIZE,
-) -> dict:
-    """Given a seedling's bounding extent (image coords), return the padded
-    crop box {"cx", "cy", "half_w", "half_h"} -- the exact geometry
-    `Gui._compute_crop_box` derives from a start/end point pair, generalised
-    to any bounding box (here, a detected blob's extent instead of two
-    clicked points).
-
-    The padding is asymmetric on purpose: seedlings are imaged growing
-    roughly vertically, so more slack is given sideways (for the hook
-    swinging left/right) than vertically.
-    """
-    half_w = (max_x - min_x) * (1 + 2 * padding_width_fraction) / 2
-    half_h = (max_y - min_y) * (1 + 2 * padding_height_fraction) / 2
-
-    # Degenerate-case floor only, matching Gui._compute_crop_box: boxes
-    # otherwise hug the detected extent plus padding, they are not floored
-    # up to any fixed default size.
-    half_w = max(half_w, min_box_half_size)
-    half_h = max(half_h, min_box_half_size)
-
-    return {
-        "cx": round((min_x + max_x) / 2),
-        "cy": round((min_y + max_y) / 2),
-        "half_w": round(half_w),
-        "half_h": round(half_h),
-    }
-
-
 def crop_from_box(img: np.ndarray, box: dict) -> tuple[np.ndarray, int, int, int, int]:
     """Apply a crop box to an image, clamped to image bounds -- the exact
-    indexing of the GUI's start_analysis crop loop (seedling_measurment.py).
+    indexing of the GUI's start_analysis crop loop (seedling_measurement.py).
     Returns (crop, x1, y1, x2, y2)."""
     center_x, center_y = box["cx"], box["cy"]
     x1 = max(0, center_x - box["half_w"])
@@ -97,7 +66,7 @@ def build_output_filename(crop_id: int, series: str, original_filename: str) -> 
     series (e.g. every series' "IMG_086.png") never collide.
 
     Uses os.path.splitext rather than the legacy `image[:-4]` slice used in
-    seedling_measurment.py, so it is not tripped up by extensions that are
+    seedling_measurement.py, so it is not tripped up by extensions that are
     not exactly 4 characters (".jpeg", ".TIFF")."""
     stem, _ext = os.path.splitext(original_filename)
     series_part = sanitize_series_name(series)
@@ -107,7 +76,7 @@ def build_output_filename(crop_id: int, series: str, original_filename: str) -> 
 def list_image_files(path: str) -> list[str]:
     """Sorted image filenames directly in `path` (no subfolders), matching
     VALID_IMAGE_EXTENSIONS case-insensitively -- mirrors
-    seedling_measurment.py's `_list_image_files`."""
+    seedling_measurement.py's `_list_image_files`."""
     return sorted(
         f for f in os.listdir(path)
         if f.lower().endswith(VALID_IMAGE_EXTENSIONS) and os.path.isfile(os.path.join(path, f))

@@ -120,6 +120,27 @@ def test_run_landmarks_scores_a_checkpoint_with_the_landmark_head(tmp_path):
 
     out = va.run_landmarks(str(ckpt), series, crops)
     assert set(out) == {("S", 0, f) for f in files}
-    assert all(set(v) == {"landmark", "landmark_recon", "landmark_temporal"} for v in out.values())
+    assert all(set(v) == {"landmark", "landmark_recon", "landmark_temporal", "landmark_monotone"} for v in out.values())
     with pytest.raises(SystemExit):
         va.run_landmarks(str(plain), series, crops)
+
+
+def test_geometric_truth_flags_a_cotyledon_axis_that_crosses_the_hypocotyl_axis(tmp_path):
+    from utils.angle_annotation import CSV_FIELDS
+    path = tmp_path / "gt.csv"
+
+    def row(frame, theta, cotyl):
+        r = {f: "" for f in CSV_FIELDS}
+        r.update({"series": "A", "crop_id": 0, "frame": frame, "crop_file": f"0-crop-{frame}.png", "status": "measured",
+                  "theta": theta, "bio_angle": 180 - theta, "junction_x": 30, "junction_y": 30, "hypo1_x": 30,
+                  "hypo1_y": 50, "hypo2_x": 30, "hypo2_y": 80, "cotyl1_x": cotyl[0], "cotyl1_y": cotyl[1],
+                  "cotyl2_x": cotyl[2], "cotyl2_y": cotyl[3]})
+        return r
+
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        w.writeheader()
+        w.writerow(row("f1", 10.0, (27, 31, 30, 60)))      # base left of the stem, tip swings back across it
+        w.writerow(row("f2", 10.0, (27, 31, 24, 60)))      # leans away from the stem: closed, not overhooked
+    rows = va.load_truth(str(path), fold=False, geometric=True)
+    assert [(r["gt_overhook"], r["gt"]) for r in rows] == [(1, 190.0), (0, 170.0)]

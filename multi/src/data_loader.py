@@ -134,7 +134,9 @@ class PatchDataset(Dataset):
                     "paf_valid": np.zeros((2, size, size), np.float32),
                     "collar_hm": np.zeros((size, size), np.float32),
                     "root_vec": np.zeros((2, size, size), np.float32),
-                    "root_valid": np.zeros((1, size, size), np.float32)}
+                    "root_valid": np.zeros((1, size, size), np.float32),
+                    "base_hm": np.zeros((size, size), np.float32),
+                    "tip_hm": np.zeros((size, size), np.float32)}
         with Image.open(self._raw_path(row)) as im:
             w, h = im.size
         t = render_targets(h, w, lm, sigma=self.hm_sigma, ray_width=self.ray_width)
@@ -153,7 +155,8 @@ class PatchDataset(Dataset):
                 kp = dict(kp, hm=kp["hm"][:, ::-1].copy(), paf=kp["paf"][:, :, ::-1].copy(),
                           paf_valid=kp["paf_valid"][:, :, ::-1].copy(),
                           collar_hm=kp["collar_hm"][:, ::-1].copy(), root_vec=kp["root_vec"][:, :, ::-1].copy(),
-                          root_valid=kp["root_valid"][:, :, ::-1].copy())
+                          root_valid=kp["root_valid"][:, :, ::-1].copy(),
+                          base_hm=kp["base_hm"][:, ::-1].copy(), tip_hm=kp["tip_hm"][:, ::-1].copy())
                 kp["paf"][[0, 2]] *= -1.0
                 kp["root_vec"][0] *= -1.0
 
@@ -223,6 +226,8 @@ class PatchDataset(Dataset):
             collar_hm=warp(kp["collar_hm"], cv2.INTER_LINEAR),
             root_vec=np.stack([warp(c, cv2.INTER_NEAREST) for c in root]),
             root_valid=np.stack([warp(c, cv2.INTER_NEAREST) for c in kp["root_valid"]]),
+            base_hm=warp(kp["base_hm"], cv2.INTER_LINEAR),
+            tip_hm=warp(kp["tip_hm"], cv2.INTER_LINEAR),
         )
 
     def __getitem__(self, idx):
@@ -267,5 +272,10 @@ class PatchDataset(Dataset):
             "root_vec": torch.from_numpy(np.ascontiguousarray(kp["root_vec"])),
             "root_valid": torch.from_numpy(np.ascontiguousarray(kp["root_valid"])),
             "has_collar": torch.tensor(float(kp["collar_hm"].max() > PEAK_PRESENT), dtype=torch.float32),
+            "base_hm": torch.from_numpy(np.ascontiguousarray(kp["base_hm"])),
+            "tip_hm": torch.from_numpy(np.ascontiguousarray(kp["tip_hm"])),
+            # a tile that cuts the tip off says nothing about it: only tiles that contain the peak count
+            "has_tip": torch.tensor(float(kp["tip_hm"].max() > PEAK_PRESENT and kp["base_hm"].max() > PEAK_PRESENT),
+                                    dtype=torch.float32),
         }
         return torch.from_numpy(image_chw), torch.from_numpy(label_hw), targets

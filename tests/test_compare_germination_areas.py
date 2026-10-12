@@ -36,7 +36,7 @@ def test_germ_contour_recipe_extracts_known_blob_area():
 
 def test_germ_contour_recipe_keeps_small_blob_with_fewer_than_5_points():
     """The 5-point floor (a cv2.fitEllipse prerequisite) belongs to the
-    cotyledon/hypocotyl angle path only -- seedling_measurment.py:1067's
+    cotyledon/hypocotyl angle path only -- Gui._process_ellipse_frame's
     comment is explicit that germ contours are never floored. A 2x2 pixel
     square rasterizes to a 4-point contour; it must survive here."""
     mask = np.zeros((50, 50), dtype=np.uint8)
@@ -56,7 +56,7 @@ def test_germ_contour_recipe_none_mask_is_no_contours():
 def test_germ_contour_recipe_applies_threshold_at_127():
     """Values above 127 count as foreground even if not already exactly
     255 -- cv2.threshold(img_germ, 127, 255, THRESH_BINARY), matching
-    seedling_measurment.py:1033 exactly."""
+    Gui._clean_ellipse_masks exactly."""
     mask = np.zeros((30, 30), dtype=np.uint8)
     mask[5:25, 5:25] = 200  # above 127, below 255
 

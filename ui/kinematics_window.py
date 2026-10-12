@@ -14,6 +14,9 @@ STATE_COLORS = {
     "Manual": "tab:purple",
 }
 UNKNOWN_STATE_COLOR = "0.5"
+# Transparency of the per-seedling curves and their points (overlapping seedlings stay readable).
+CURVE_ALPHA = 0.35
+POINT_ALPHA = 0.6
 UNKNOWN_STATE_LABEL = "Unclassified"
 
 # Line color per seedling, so a seedling stays identifiable even where its
@@ -57,12 +60,36 @@ class KinematicsWindow(tk.Toplevel):
         self.canvas = FigureCanvasTkAgg(self.figure, master=self)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        tk.Button(self, text="Refresh", command=self.refresh).pack(pady=6)
+        # Clicking a point opens that seedling's analysis window at that frame.
+        self._pick_targets = {}      # scatter artist -> (crop_id, frame indices in plotted order)
+        self.canvas.mpl_connect("pick_event", self._on_pick)
+
+        bottom = tk.Frame(self)
+        bottom.pack(pady=6)
+        tk.Button(bottom, text="Refresh", command=self.refresh).pack(side=tk.LEFT)
+        tk.Label(bottom, text="Click a point to open that seedling at that frame", fg="#555555").pack(
+            side=tk.LEFT, padx=(12, 0))
 
         self.refresh()
 
+    def _on_pick(self, event):
+        target = self._pick_targets.get(event.artist)
+        if target is None or not len(event.ind):
+            return
+        crop_id, frame_indices = target
+        # Several overlapping points can be hit at once: take the one nearest the click.
+        if event.mouseevent is not None and event.mouseevent.xdata is not None and len(event.ind) > 1:
+            offsets = event.artist.get_offsets()
+            px, py = self.ax.transData.transform((event.mouseevent.xdata, event.mouseevent.ydata))
+            pts = self.ax.transData.transform(offsets[event.ind])
+            best = event.ind[int(np.argmin(np.hypot(pts[:, 0] - px, pts[:, 1] - py)))]
+        else:
+            best = event.ind[0]
+        self.gui.open_seedling_frame(crop_id, frame_indices[best])
+
     def refresh(self):
         self.ax.clear()
+        self._pick_targets = {}
 
         n_frames = len(self.gui.file_list) if getattr(self.gui, "file_list", None) else 0
         use_time_deltas = n_frames > 0 and len(self.gui.time_deltas) == n_frames
@@ -93,7 +120,7 @@ class KinematicsWindow(tk.Toplevel):
             time_zero = detector.get_time_zero(crop_id) if detector is not None else None
             unaligned = time_zero is None or time_zero >= len(x_axis_all)
 
-            xs, ys, colors = [], [], []
+            xs, ys, colors, frames = [], [], [], []
             for frame_idx, result in enumerate(frame_results):
                 if result is None or frame_idx >= len(x_axis_all):
                     continue
@@ -107,6 +134,7 @@ class KinematicsWindow(tk.Toplevel):
                     x = x - x_axis_all[time_zero]
                 xs.append(x)
                 ys.append(angle)
+                frames.append(frame_idx)
                 state = result.get("state_dict", {}).get(seed_id)
                 colors.append(STATE_COLORS.get(state, UNKNOWN_STATE_COLOR))
                 state_label = state if state in STATE_COLORS else UNKNOWN_STATE_LABEL
@@ -123,11 +151,13 @@ class KinematicsWindow(tk.Toplevel):
 
             style = "--" if unaligned else "-"
             line_color = SEEDLING_LINE_COLORS[crop_id % len(SEEDLING_LINE_COLORS)]
-            label = f"Seedling {seed_id}" + (" (ungerminated)" if unaligned else "")
-            self.ax.plot(xs_sorted/60, ys_sorted, style, color=line_color, linewidth=1, zorder=1)
-            self.ax.scatter(xs_sorted/60, ys_sorted, c=colors_sorted, zorder=2, s=18)
-            seedling_handles.append(Line2D([], [], linestyle=style, color=line_color,
-                                            linewidth=1, label=label))
+            # minutes -> hours on a time axis; a frame-index axis is plotted as is
+            xs_plot = xs_sorted / 60 if use_time_deltas else xs_sorted
+            # Semi-transparent, so overlapping seedlings stay readable and outliers stand out.
+            self.ax.plot(xs_plot, ys_sorted, style, color=line_color, linewidth=1, alpha=CURVE_ALPHA, zorder=1)
+            points = self.ax.scatter(xs_plot, ys_sorted, c=colors_sorted, zorder=2, s=18, alpha=POINT_ALPHA,
+                                     edgecolors="none", picker=5)
+            self._pick_targets[points] = (crop_id, [frames[i] for i in order])
 
         if not any_plotted:
             self.ax.text(0.5, 0.5, "No results yet -- run Start Analysis or preview a seedling",
@@ -148,10 +178,7 @@ class KinematicsWindow(tk.Toplevel):
                 for s in states_seen
             ]
             if state_handles:
-                self.ax.add_artist(self.ax.legend(handles=state_handles, title="State",
-                                                   fontsize=8, title_fontsize=8, loc="upper right"))
-            if seedling_handles:
-                self.ax.legend(handles=seedling_handles, title="Seedling",
-                                fontsize=8, title_fontsize=8, loc="lower left")
+                self.ax.legend(handles=state_handles, title="State",
+                                fontsize=8, title_fontsize=8, loc="upper right")
 
         self.canvas.draw_idle()

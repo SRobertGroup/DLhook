@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import cv2
@@ -6,6 +7,8 @@ from skimage import img_as_ubyte
 from skimage.util import img_as_float
 from PIL import Image, ImageOps, ImageEnhance
 import datetime
+
+log = logging.getLogger(__name__)
 
 
 
@@ -90,7 +93,7 @@ def _metadata_capture_times(path):
             if parsed is not None:
                 candidates.append(parsed)
     except Exception as e:
-        print(f"[WARNING] Failed to read embedded timestamps for {path}: {e}")
+        log.warning(f"Failed to read embedded timestamps for {path}: {e}")
 
     return candidates
 

@@ -170,6 +170,7 @@ def head_from_state_dict(state_dict: dict) -> str:
 
 KP_CHANNELS = 5  # landmark head: 1 junction-heatmap logit + 2 x (x, y) direction fields
 KP_CHANNELS_ROOT = 8  # + 1 collar-heatmap logit + the root (x, y) direction field
+KP_CHANNELS_COTYL = 10  # + cotyledon base and cotyledon tip heatmap logits (needs the root head)
 
 
 def strip_deprecated_landmark_keys(state_dict: dict) -> dict:
@@ -194,10 +195,19 @@ def has_landmark_head(state_dict: dict) -> bool:
 
 def landmark_root_from_state_dict(state_dict: dict) -> bool:
     """True when the landmark head also predicts the collar and root direction
-    (conv_kp has 8 output channels instead of 5)."""
+    (conv_kp has 8 output channels instead of 5; the 10-channel head has it too)."""
     for name, value in state_dict.items():
         if name.replace("module.", "", 1) == "conv_kp.weight":
-            return int(value.shape[0]) == KP_CHANNELS_ROOT
+            return int(value.shape[0]) in (KP_CHANNELS_ROOT, KP_CHANNELS_COTYL)
+    return False
+
+
+def landmark_cotyl_from_state_dict(state_dict: dict) -> bool:
+    """True when the landmark head also predicts the cotyledon base and tip heatmaps
+    (conv_kp has 10 output channels)."""
+    for name, value in state_dict.items():
+        if name.replace("module.", "", 1) == "conv_kp.weight":
+            return int(value.shape[0]) == KP_CHANNELS_COTYL
     return False
 
 
@@ -212,7 +222,7 @@ def landmark_hidden_from_state_dict(state_dict: dict) -> int:
 
 class UNetGNRes(nn.Module):
     def __init__(self, im_channels=3, n_classes=2, head=HEAD_GROUPNORM, landmark_head=False, landmark_hidden=0,
-                 landmark_root=False):
+                 landmark_root=False, landmark_cotyl=False):
         super().__init__()
         self.conv_in = nn.Sequential(
             nn.Conv2d(im_channels, 64, kernel_size=3, padding=1),  # padding 0
@@ -262,8 +272,12 @@ class UNetGNRes(nn.Module):
                                nn.ReLU(), nn.GroupNorm(32, width)]
                     in_ch = width
                 self.kp_trunk = nn.Sequential(*layers)
+            self.landmark_cotyl = bool(landmark_cotyl)
+            if self.landmark_cotyl and not landmark_root:
+                raise ValueError("landmark_cotyl needs landmark_root (the channels are stored after the root ones)")
             self.landmark_root = bool(landmark_root)
-            self.conv_kp = nn.Conv2d(width, KP_CHANNELS_ROOT if self.landmark_root else KP_CHANNELS,
+            self.conv_kp = nn.Conv2d(width, KP_CHANNELS_COTYL if self.landmark_cotyl else
+                                     KP_CHANNELS_ROOT if self.landmark_root else KP_CHANNELS,
                                      kernel_size=1, padding=0)
             # Start the junction channel at a low prior (sigmoid(-4.6) = 0.01) like
             # CornerNet/CenterNet. At 0.5 everywhere, the ~63k background pixels of a
@@ -273,6 +287,9 @@ class UNetGNRes(nn.Module):
                 self.conv_kp.bias[0] = -4.6
                 if self.landmark_root:
                     self.conv_kp.bias[5] = -4.6          # collar heatmap, same low prior
+                if self.landmark_cotyl:
+                    self.conv_kp.bias[8] = -4.6          # cotyledon base heatmap
+                    self.conv_kp.bias[9] = -4.6          # cotyledon tip heatmap
 
     def _features(self, x):
         out1 = self.conv_in(x)

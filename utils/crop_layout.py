@@ -162,3 +162,44 @@ def spatial_order(boxes):
                 continue
         rows.append([k])
     return [k for row in rows for k in sorted(row, key=lambda k: (boxes[k]["cx"], k))]
+
+
+# ---------------------------------------------------------------------------
+# Padded crop box from a drawn seedling extent (shared by the main window's
+# box canvas and the headless re-cropper; multi/src/recrop_geometry.py
+# re-exports these names).
+# ---------------------------------------------------------------------------
+
+# The main window's padding defaults, mirrored by recrop_plates.py.
+DEFAULT_PADDING_WIDTH_FRACTION = 0.4
+DEFAULT_PADDING_HEIGHT_FRACTION = 0.10
+DEFAULT_MIN_BOX_HALF_SIZE = 30
+
+
+def compute_crop_box(
+    min_x: float,
+    max_x: float,
+    min_y: float,
+    max_y: float,
+    padding_width_fraction: float = DEFAULT_PADDING_WIDTH_FRACTION,
+    padding_height_fraction: float = DEFAULT_PADDING_HEIGHT_FRACTION,
+    min_box_half_size: float = DEFAULT_MIN_BOX_HALF_SIZE,
+) -> dict:
+    """Given a seedling's bounding extent (image coords), return the padded
+    crop box {"cx", "cy", "half_w", "half_h"}.
+
+    The padding is asymmetric on purpose: seedlings are imaged growing
+    roughly vertically, so more slack is given sideways (for the hook
+    swinging left/right) than vertically. The minimum half-size is a
+    degenerate-case floor only: boxes otherwise hug the extent plus padding.
+    """
+    half_w = (max_x - min_x) * (1 + 2 * padding_width_fraction) / 2
+    half_h = (max_y - min_y) * (1 + 2 * padding_height_fraction) / 2
+    half_w = max(half_w, min_box_half_size)
+    half_h = max(half_h, min_box_half_size)
+    return {
+        "cx": round((min_x + max_x) / 2),
+        "cy": round((min_y + max_y) / 2),
+        "half_w": round(half_w),
+        "half_h": round(half_h),
+    }

@@ -54,13 +54,13 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from ui.zoomable_canvas import ZoomableImageCanvas  # noqa: E402
+from utils.landmark_edit import (  # noqa: E402
+    COTYL_COLOR, HYPO_COLOR, JUNCTION_COLOR, landmark_shapes,
+)
 from utils.angle_annotation import (  # noqa: E402
     AngleClickSession, AnnotationStore, default_manifest, load_queue, orient_axis, repeat_queue,
 )
 
-HYPO_COLOR = "#ff9f1c"
-COTYL_COLOR = "#2ec4b6"
-JUNCTION_COLOR = "#ff3b30"
 HELP_TEXT = (
     "Mouse wheel: zoom at cursor\n"
     "Enter / Space: save and next\n"
@@ -77,7 +77,7 @@ class AngleAnnotatorApp(tk.Tk):
     CANVAS_W, CANVAS_H = 560, 720
 
     def __init__(self, folder, out_path, per_seedling=10, seed=0, manifest_path=None, split=None,
-                 patch_index_dir=None, queue=None):
+                 patch_index_dir=None, queue=None, store=None):
         super().__init__()
         self.title("DLhook - angle ground truth")
         self.folder = folder
@@ -90,7 +90,7 @@ class AngleAnnotatorApp(tk.Tk):
                 "or point --folder at cropped_training_set.")))
             self.destroy()
             raise SystemExit(1)
-        self.store = AnnotationStore(out_path)
+        self.store = store if store is not None else AnnotationStore(out_path)
         self.index = 0
         self._shown_seedling = None
         self.session = AngleClickSession()
@@ -110,7 +110,7 @@ class AngleAnnotatorApp(tk.Tk):
         self.canvas.grid(row=0, column=0, rowspan=2, padx=8, pady=8)
         self.canvas.bind("<Button-1>", self._on_click)
 
-        panel = tk.Frame(self)
+        panel = self.panel = tk.Frame(self)
         panel.grid(row=0, column=1, sticky="n", padx=(0, 12), pady=8)
         self.info_label = tk.Label(panel, text="", justify=tk.LEFT, font=("Helvetica", 12, "bold"))
         self.info_label.pack(anchor="w")
@@ -247,28 +247,8 @@ class AngleAnnotatorApp(tk.Tk):
     # --- display ----------------------------------------------------------
 
     def _overlay_shapes(self):
-        pts = self.session.named_points()
-        shapes = []
-        colors = {"junction": JUNCTION_COLOR, "hypo_1": HYPO_COLOR, "hypo_2": HYPO_COLOR,
-                  "cotyl_1": COTYL_COLOR, "cotyl_2": COTYL_COLOR}
-        labels = {"junction": "J", "hypo_1": "H1", "hypo_2": "H2", "cotyl_1": "C1", "cotyl_2": "C2"}
-        for name, xy in pts.items():
-            shapes.append({"kind": "point", "xy": xy, "color": colors[name], "label": labels[name]})
-
-        if "junction" in pts:
-            j = pts["junction"]
-            for a, b, color in (("hypo_1", "hypo_2", HYPO_COLOR), ("cotyl_1", "cotyl_2", COTYL_COLOR)):
-                if a in pts and b in pts:
-                    shapes.append({"kind": "line", "from": pts[a], "to": pts[b], "color": color, "dash": True})
-                    try:  # arrow from the junction along the auto-oriented axis
-                        ux, uy = orient_axis(pts[a], pts[b], j)
-                    except ValueError:
-                        continue
-                    length = max(40.0, 1.2 * max(abs(pts[a][0] - j[0]) + abs(pts[a][1] - j[1]),
-                                                  abs(pts[b][0] - j[0]) + abs(pts[b][1] - j[1])))
-                    shapes.append({"kind": "line", "from": j, "to": (j[0] + ux * length, j[1] + uy * length),
-                                   "color": color, "arrow": True})
-        return shapes
+        # The drawing logic is shared with the analysis window: utils/landmark_edit.landmark_shapes
+        return landmark_shapes(self.session.named_points())
 
     def _refresh(self):
         item = self.item

@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.config import load_config, resolved_path
 from src.data_loader import PatchDataset
-from src.landmarks import (landmark_patch_rows, load_landmarks, namespace_landmarks, readout_from_fields,
-                           split_by_seedling, theta_between)
+from src.landmarks import (angle_balanced_weights, angle_bin, landmark_patch_rows, load_landmarks,
+                           namespace_landmarks, readout_from_fields, split_by_seedling, theta_between)
 from src.loss_functions import align_output_to_target, build_loss, landmark_loss
 from src.model import build_model
 from models.unet import strip_deprecated_landmark_keys
@@ -259,7 +259,7 @@ def run_landmark_validation(model, loader, device, readout_radius: float = 3.0,
 def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, raw_ext: str = ".png",
                                       patch_size: int = 252, readout_radius: float = 3.0,
                                       missing_penalty_deg: float = 90.0, missing_penalty_px: float = 30.0,
-                                      raw_paths: dict | None = None) -> dict:
+                                      raw_paths: dict | None = None, per_crop: dict | None = None) -> dict:
     """Landmark metrics on WHOLE crops of the held-out annotated seedlings, read through
     MulticlassInference's own tiling and readout -- the conditions the model is used in.
     The patch metrics of run_landmark_validation score 252 px tiles, where padding,
@@ -269,12 +269,15 @@ def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, r
     Errors are against the annotated landmark itself (not a re-rendered target). A crop
     with no junction found counts as missing_penalty_deg; a missing collar as
     missing_penalty_px / missing_penalty_deg. `raw_paths` ({name: image path}) overrides
-    raw_dir for crops from other folders (landmarks.extra_sources)."""
+    raw_dir for crops from other folders (landmarks.extra_sources). With `per_crop` (a dict) it
+    is filled with {name: {"err": theta error, "theta_gt", "theta_pred", "path"}} for every crop."""
     import cv2
     from models.UNetInference import MARGIN
-    from models.multiclass_inference import MulticlassInference
+    from models.multiclass_inference import LandmarkEnsemble, MulticlassInference
 
-    model.eval()
+    models = list(model) if isinstance(model, (list, tuple)) else [model]    # several = averaged before the readout
+    for m in models:
+        m.eval()
     images, kept = [], []
     for name in sorted(landmarks):
         path = (raw_paths or {}).get(name) or Path(raw_dir) / (Path(name).stem + raw_ext)
@@ -282,15 +285,30 @@ def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, r
         if image is not None:
             images.append(image)
             kept.append(name)
-    inference = MulticlassInference.from_model(model, device=device, in_size=patch_size + 2 * MARGIN,
-                                               out_size=patch_size, margin=MARGIN)
+    members = [MulticlassInference.from_model(m, device=device, in_size=patch_size + 2 * MARGIN,
+                                              out_size=patch_size, margin=MARGIN) for m in models]
+    inference = members[0] if len(members) == 1 else LandmarkEnsemble(members)
     readouts = []
     for start in range(0, len(images), 16):
         readouts += inference.predict_landmarks(images[start:start + 16], readout_radius=readout_radius)
 
     theta_err, junction_err, collar_err, root_err = [], [], [], []
+    tip_err, base_err, tip_paths = [], [], []
     for name, r in zip(kept, readouts):
         lm = landmarks[name]
+        if per_crop is not None:
+            per_crop[name] = {"err": missing_penalty_deg if r is None else abs(r["theta"] - lm.theta),
+                              "theta_gt": lm.theta, "theta_pred": None if r is None else r["theta"],
+                              "path": "" if r is None else r.get("cotyl_path", ""),
+                              "overhook_gt": lm.overhook, "overhook_pred": None if r is None else r.get("overhook"),
+                              "hypo_deg": None if r is None else theta_between(r["hypo_dir"], lm.hypo_dir),
+                              "cotyl_deg": None if r is None else theta_between(r["cotyl_dir"], lm.cotyl_dir)}
+        if r is not None and r.get("tip") is not None and lm.cotyl_tip is not None:
+            tip_err.append(float(np.hypot(r["tip"][0] - lm.cotyl_tip[0], r["tip"][1] - lm.cotyl_tip[1])))
+            if r.get("base") is not None and lm.cotyl_base is not None:
+                base_err.append(float(np.hypot(r["base"][0] - lm.cotyl_base[0], r["base"][1] - lm.cotyl_base[1])))
+        if r is not None and "cotyl_path" in r:
+            tip_paths.append(r["cotyl_path"] != "field")
         if r is None:
             theta_err.append(missing_penalty_deg)
         else:
@@ -310,6 +328,9 @@ def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, r
         "wholecrop_junction_px": float(np.median(junction_err)) if junction_err else nan,
         "wholecrop_collar_px": float(np.median(collar_err)) if collar_err else nan,
         "wholecrop_root_deg": float(np.median(root_err)) if root_err else nan,
+        "wholecrop_tip_px": float(np.median(tip_err)) if tip_err else nan,
+        "wholecrop_base_px": float(np.median(base_err)) if base_err else nan,
+        "wholecrop_tip_used": float(np.mean(tip_paths)) if tip_paths else nan,
         "wholecrop_n": len(kept),
     }
 
@@ -371,6 +392,7 @@ def load_extra_landmark_sources(config: dict, sources, existing: dict, patch_siz
 LANDMARK_COLUMNS = ["landmark_angle_mae", "junction_px_err"]
 WHOLECROP_COLUMNS = ["wholecrop_theta_mae", "wholecrop_theta_median", "wholecrop_junction_px"]
 WHOLECROP_ROOT_COLUMNS = ["wholecrop_collar_px", "wholecrop_root_deg"]
+WHOLECROP_COTYL_COLUMNS = ["wholecrop_tip_px", "wholecrop_base_px", "wholecrop_tip_used"]
 ROOT_COLUMNS = ["collar_px_err", "root_angle_err"]          # only when landmarks.root_csv is set
 
 
@@ -407,7 +429,8 @@ def run_training(config: dict, resume: bool = False) -> dict:
     head_prefixes = ("conv_kp.", "kp_trunk.") + tuple(lm_cfg.get("trainable_extra") or ())
     lm_train, lm_val, lm_weights = None, {}, None
     lm_columns = (LANDMARK_COLUMNS + (ROOT_COLUMNS if lm_cfg.get("root_csv") else [])
-                  + WHOLECROP_COLUMNS + (WHOLECROP_ROOT_COLUMNS if lm_cfg.get("root_csv") else []))
+                  + WHOLECROP_COLUMNS + (WHOLECROP_ROOT_COLUMNS if lm_cfg.get("root_csv") else [])
+                  + (WHOLECROP_COTYL_COLUMNS if model_cfg.get("landmark_cotyl") else []))
     if use_landmarks:
         if not model_cfg.get("landmark_head"):
             raise ValueError("landmarks.enabled requires model.landmark_head: true")
@@ -422,14 +445,18 @@ def run_training(config: dict, resume: bool = False) -> dict:
               + (f", {lm_report['with_root']} with collar/root" if "with_root" in lm_report else ""))
         if lm_cfg.get("root_csv") and not model_cfg.get("landmark_root"):
             raise ValueError("landmarks.root_csv requires model.landmark_root: true")
+        if model_cfg.get("landmark_cotyl") and not model_cfg.get("landmark_root"):
+            raise ValueError("model.landmark_cotyl requires model.landmark_root: true")
         if not all_landmarks:
             raise ValueError("landmarks.enabled but no usable annotated train-split crop was found")
         extra_landmarks, lm_raw_paths, lm_extra_rows = load_extra_landmark_sources(
             config, lm_cfg.get("extra_sources"), all_landmarks, int(data_cfg.get("patch_size", 252)),
             int(data_cfg.get("train_stride", data_cfg.get("patch_size", 252))))
         all_landmarks = {**all_landmarks, **extra_landmarks}
+        # split_seed fixes which seedlings are held out, apart from training.seed, so ensemble members
+        # trained with different seeds still select their checkpoint on the same plants
         lm_train, lm_val = split_by_seedling(all_landmarks, lm_cfg.get("val_fraction", 0.15),
-                                             training_cfg.get("seed", 0))
+                                             lm_cfg.get("split_seed", training_cfg.get("seed", 0)))
         lm_weights = lm_cfg.get("loss_weights") or {}
         print(f"Landmark seedling split: {len(lm_train)} train / {len(lm_val)} validation crops")
 
@@ -448,9 +475,22 @@ def run_training(config: dict, resume: bool = False) -> dict:
 
     num_workers = training_cfg.get("num_workers", 0)
     oversample = float(lm_cfg.get("oversample", 1.0)) if use_landmarks else 1.0
+    sampling = lm_cfg.get("sampling", "uniform") if use_landmarks else "uniform"
+    if sampling not in ("uniform", "angle_balanced"):
+        raise ValueError("landmarks.sampling must be 'uniform' or 'angle_balanced'")
     if oversample > 1.0:
-        # Annotated crops are a small fraction of the patches: draw them more often
-        sample_weights = [oversample if row["filename"] in lm_train else 1.0 for row in train_dataset.rows]
+        # Annotated crops are a small fraction of the patches: draw them more often. With
+        # sampling: angle_balanced each angle bin (closed / middle / open hook) is drawn equally
+        # often among the annotated crops, on top of the oversampling.
+        balance = angle_balanced_weights(lm_train) if sampling == "angle_balanced" else {}
+        if balance:
+            print("Angle-balanced sampling of the annotated crops: "
+                  + ", ".join(f"{label} {sum(1 for lm in lm_train.values() if angle_bin(lm.theta) == b)} crops x"
+                              f"{next(balance[n] for n, lm in lm_train.items() if angle_bin(lm.theta) == b):.2f}"
+                              for b, label in enumerate(("closed", "middle", "open"))
+                              if any(angle_bin(lm.theta) == b for lm in lm_train.values())))
+        sample_weights = [oversample * balance.get(row["filename"], 1.0) if row["filename"] in lm_train else 1.0
+                          for row in train_dataset.rows]
         sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_dataset), replacement=True)
         train_loader = DataLoader(train_dataset, batch_size=training_cfg["batch_size"],
                                    sampler=sampler, num_workers=num_workers)
@@ -535,6 +575,8 @@ def run_training(config: dict, resume: bool = False) -> dict:
             raise FileNotFoundError(
                 f"--resume was passed but no checkpoint exists at {last_checkpoint_path}"
             )
+        # weights_only=False on purpose: last.pt is this run's own resume file (optimizer/scaler state
+        # and history), never a downloaded weight file.
         checkpoint = torch.load(last_checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(strip_deprecated_landmark_keys(checkpoint["model_state_dict"]))
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

@@ -24,13 +24,14 @@ this step and none of it is driven here.
 """
 from __future__ import annotations
 
+from utils.paths import crop_path
 import inspect
 import os
 
 import pytest
 
 from models import segmentation_backends
-from seedling_measurment import Gui
+from seedling_measurement import Gui
 
 # The exact (weight_path, label) sequence pinned by
 # tests/test_segmentation_backends.py::test_binary_backend_predict_into_pins_todays_call_sequence.
@@ -80,8 +81,10 @@ class _FakeReporter:
 
 @pytest.fixture(autouse=True)
 def _clean_backend_state(monkeypatch):
-    # Default backend ("binary"), regardless of the running shell's env.
-    monkeypatch.delenv(segmentation_backends.ENV_VAR, raising=False)
+    # Legacy binary backend + ellipse angle source, regardless of the running shell's env
+    # (the default backend is now multiclass).
+    monkeypatch.setenv(segmentation_backends.ENV_VAR, "binary")
+    monkeypatch.setenv("DLHOOK_ANGLE_SOURCE", "ellipse")
     segmentation_backends._BACKEND_CACHE.clear()
     yield
     segmentation_backends._BACKEND_CACHE.clear()
@@ -124,7 +127,7 @@ def test_run_apical_pipeline_segments_via_segment_paths(monkeypatch):
     assert get_predictor_calls == _EXPECTED_WEIGHT_PATHS
     assert [call[2] for call in predict_files_calls] == _EXPECTED_LABELS
 
-    expected_paths = (os.path.join("data/images", "0-crop-frame1.png"),)
+    expected_paths = (crop_path("0-crop-frame1.png"),)
     assert all(call[1] == expected_paths for call in predict_files_calls)
 
     assert [call[1] for call in fake.mask_store.put_raw_bulk_calls] == _EXPECTED_LABELS
@@ -146,7 +149,7 @@ def test_segment_single_seedling_segments_via_segment_paths(monkeypatch):
     assert get_predictor_calls == _EXPECTED_WEIGHT_PATHS
     assert [call[2] for call in predict_files_calls] == _EXPECTED_LABELS
 
-    expected_paths = tuple(os.path.join("data/images", f) for f in cropped)
+    expected_paths = tuple(crop_path(f) for f in cropped)
     assert all(call[1] == expected_paths for call in predict_files_calls)
 
     assert [call[1] for call in fake.mask_store.put_raw_bulk_calls] == _EXPECTED_LABELS

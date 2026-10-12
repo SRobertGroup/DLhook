@@ -1,11 +1,12 @@
 
+import logging
 import os
 import cv2
-import ast
 from typing import Optional, Tuple
 from dataclasses import dataclass
 import numpy as np
-import pandas as pd
+
+log = logging.getLogger(__name__)
 
 class ApicalHook:
     def __init__(self, img_name, time_series_contours, germ_time, hypo_mask, seedling_points, point_ids, image):
@@ -27,15 +28,15 @@ class ApicalHook:
 
         self.matches = self.matcher.match()
 
-        print(f"Matched {len(self.matches)} cotyledon-hypocotyl pairs")
+        log.debug(f"Matched {len(self.matches)} cotyledon-hypocotyl pairs")
 
         for match in self.matches:
             try:
                 angle_diff_2, bio_state = self.angle_calc.compute_biological_angle(match.cotyl_ellipse, match.stem_ellipse)
             except (ValueError, TypeError) as e:
-                print(f"[WARNING] Skipping match due to ellipse error: {e}")
+                log.warning(f"Skipping match due to ellipse error: {e}")
                 continue
-            print(f"Angle = {angle_diff_2:.2f}°, Type = {bio_state}")
+            log.debug(f"Angle = {angle_diff_2:.2f}°, Type = {bio_state}")
             self.angles[match.stem_id] = angle_diff_2
             self.states[match.stem_id] = bio_state
             self.visualizer.draw_match(match, angle_diff_2)
@@ -104,7 +105,7 @@ class RegionMatcher:
         valid_matches = []
 
         # Whole-mask contours, found once: each crop is built around a single
-        # start/end seedling pair (see _ensure_crop_points), so the cotyledon
+        # seedling box (one seedling per crop, see Gui._seed_point), so the cotyledon
         # and its hypocotyl already share the same crop -- no per-cotyledon
         # local window is needed to relate them, and one was actively harmful
         # (it used to be a fixed 1.6%-of-crop-width radius, which rounds down
@@ -165,10 +166,10 @@ class RegionMatcher:
             score_2 = score(assignments_2)
 
             if score_1 >= score_2:
-                print(f"[INFO] Using closest-X assignment: score {score_2} >= {score_1}")
+                log.info(f"Using closest-X assignment: score {score_2} >= {score_1}")
                 best_assignment = assignments_2
             else:
-                print(f"[INFO] Using order assignment: score {score_1} > {score_2}")
+                log.info(f"Using order assignment: score {score_1} > {score_2}")
                 best_assignment = assignments_1
 
         # Build final list
@@ -286,78 +287,6 @@ class AngleCalculator:
         y = (A1 * C2 - A2 * C1) / det
         return (x, y)
 
-class AngleDictHandler:
-    def __init__(self, csv_path="img_angle_data.csv"):
-        self.csv_path = csv_path
-        self.df = pd.read_csv(csv_path)
-
-        # Set index to filename (strip whitespace just in case)
-        self.df.set_index('filename', inplace=True)
-        self.df.index = self.df.index.map(lambda x: str(x).strip())
-
-        # Parse stringified lists
-        self.df['angles'] = self.df['angles'].apply(self._parse_angle_list)
-        self.df['tot_numb'] = self.df['tot_numb'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
-
-    def _parse_angle_list(self, val):
-        try:
-            result = ast.literal_eval(val) if isinstance(val, str) else val
-            return [float(v) if isinstance(v, (int, float, np.integer, np.floating)) else '-' for v in result]
-        except Exception as e:
-            print(f"[WARNING] Failed to parse angle list: {val} ({e})")
-            return []
-
-    def get_angles_for_image(self, img_name, seedling_ids):
-        """Return list of (seedling_id, angle) for given image."""
-        img_name = str(img_name).strip()
-        if img_name not in self.df.index:
-            print(f"[WARNING] Image '{img_name}' not found in angle data.")
-            return [(sid, '-') for sid in seedling_ids]
-
-        row = self.df.loc[img_name]
-        angle_list = row['angles']
-        tot_numb = row['tot_numb']
-
-        angle_map = dict(zip(tot_numb, angle_list))
-        result = []
-        for sid in seedling_ids:
-            angle = angle_map.get(sid, '-')
-            if isinstance(angle, float) and np.isnan(angle):
-                result.append((sid, '-'))
-            else:
-                result.append((sid, round(angle) if isinstance(angle, (float, int)) else '-'))
-        return result
-
-    def set_angle(self, img_name, seedling_id, new_angle):
-        """Set new angle for seedling ID in image (by list position)."""
-        img_name = str(img_name).strip()
-        if img_name not in self.df.index:
-            raise ValueError(f"Image '{img_name}' not in data.")
-
-        row = self.df.loc[img_name]
-        angles = row['angles']
-        tot_numb = row['tot_numb']
-
-        try:
-            idx = tot_numb.index(seedling_id)
-        except ValueError:
-            raise ValueError(f"Seedling ID {seedling_id} not found in tot_numb for image '{img_name}'")
-
-        angles[idx] = float(new_angle)
-        self.df.at[img_name, 'angles'] = angles
-
-    def blank_angle(self, img_name, seedling_id):
-        """Set angle for seedling ID to NaN."""
-        self.set_angle(img_name, seedling_id, np.nan)
-
-    def save(self):
-        """Save the DataFrame back to CSV with stringified angle lists."""
-        df_copy = self.df.copy()
-        df_copy['angles'] = df_copy['angles'].apply(str)
-        df_copy['tot_numb'] = df_copy['tot_numb'].apply(str)
-        df_copy.reset_index().to_csv(self.csv_path, index=False)
-    
-    
 def mask_below_seed_line(image_shape: tuple, seed_points: list[tuple[int, int]]) -> np.ndarray:
     """
     Returns a binary mask that masks out all areas *below* the line defined by seed points.
@@ -389,27 +318,6 @@ def mask_below_seed_line(image_shape: tuple, seed_points: list[tuple[int, int]])
 class ApicalVisualizer:
     def __init__(self, image: np.ndarray):
         self.image = image.copy()
-
-    def draw_cotyl_history(self, time_series_contours: list, current_frame_idx: int):
-        if len(self.image.shape) == 2 or self.image.shape[2] == 1:
-            canvas = cv2.cvtColor(self.image, cv2.COLOR_GRAY2BGR)
-        else:
-            canvas = self.image
-
-        n = min(current_frame_idx + 1, len(time_series_contours))
-
-        for t in range(n):
-            contours = time_series_contours[t]
-            if not contours:
-                continue
-
-        # Fade older frames (lighter green)
-            alpha = (t + 1) / n  # 0.1 to 1.0
-            color = (0, int(255 * alpha), 0)  # from (0,25,0) to (0,255,0)
-
-            cv2.drawContours(canvas, contours, -1, color, 1)
-
-        self.image = canvas
 
     def draw_all_cotyls_and_seed_ids(self,
                                      cotyl_contours: list[np.ndarray],

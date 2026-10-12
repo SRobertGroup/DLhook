@@ -73,7 +73,7 @@ def build_loss(cfg: dict) -> nn.Module:
     raise ValueError(f"Unknown loss.type: {loss_type!r} (expected 'cross_entropy' or 'focal')")
 
 
-DEFAULT_LANDMARK_WEIGHTS = {"hm": 1.0, "paf": 1.0, "collar": 1.0, "root": 1.0}
+DEFAULT_LANDMARK_WEIGHTS = {"hm": 1.0, "paf": 1.0, "collar": 1.0, "root": 1.0, "cotyl": 1.0}
 
 
 def landmark_loss(kp_logits: torch.Tensor, targets: dict,
@@ -95,6 +95,9 @@ def landmark_loss(kp_logits: torch.Tensor, targets: dict,
       by the target's own mass (sum hm) rather than by pixel count, which would
       make the term vanishingly small on a 252x252 patch;
     * directions: L1 against the unit vector, only where paf_valid (the ray);
+    * with a 10-channel head (channels 8 and 9 = cotyledon base and tip) and targets base_hm /
+      tip_hm / has_tip: the same heatmap loss on each, averaged over the samples whose tile
+      contains both peaks;
     * with an 8-channel head (kp_logits channels 5..7) and targets collar_hm /
       root_vec / root_valid / has_collar: the same heatmap loss on the collar and
       the same masked L1 on the root direction, each averaged over the samples that
@@ -134,4 +137,21 @@ def landmark_loss(kp_logits: torch.Tensor, targets: dict,
             collar_loss = root_loss = kp_logits[:, 5:8].sum() * 0.0
         total = total + w["collar"] * collar_loss + w["root"] * root_loss
         parts.update(collar=float(collar_loss.detach()), root=float(root_loss.detach()))
+
+    if kp_logits.shape[1] >= 10 and "tip_hm" in targets:
+        # cotyledon base (channel 8) and tip (channel 9): the junction heatmap loss on each,
+        # over the samples whose tile contains both peaks
+        has_t = (targets["has_tip"].to(kp_logits.dtype) * has).float()
+        n_t = has_t.sum()
+        if float(n_t) > 0.0:
+            cotyl_loss = kp_logits[:, 8:10].sum() * 0.0
+            for channel, key in ((8, "base_hm"), (9, "tip_hm")):
+                t = targets[key].float()
+                prob_c = torch.sigmoid(kp_logits[:, channel].float())
+                sq_c = ((1.0 + 20.0 * t) * (prob_c - t) ** 2).sum(dim=(1, 2))
+                cotyl_loss = cotyl_loss + ((sq_c / t.sum(dim=(1, 2)).clamp(min=1e-6)) * has_t).sum() / n_t
+        else:
+            cotyl_loss = kp_logits[:, 8:10].sum() * 0.0
+        total = total + w["cotyl"] * cotyl_loss
+        parts.update(cotyl=float(cotyl_loss.detach()))
     return total, parts

@@ -8,6 +8,9 @@ authors:
     given-names: Adrien
   - family-names: Doyle
     given-names: Siamsa
+  - family-names: Ratnakaram
+    given-names: Hemamshu
+  # Stéphanie Robert and Sara Raggi are co-corresponding authors (asterisks in the README citation).
   - family-names: Robert
     given-names: Stéphanie
   - family-names: Raggi

@@ -41,6 +41,7 @@ re-exports this module unchanged so existing imports keep working.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 import cv2
@@ -61,9 +62,15 @@ from models.UNetInference import (
 from models.normalization import zscore_normalize
 from models.unet import (
     UNetGNRes, align_output_to_target, has_landmark_head, head_from_state_dict,
-    landmark_hidden_from_state_dict, landmark_root_from_state_dict, strip_deprecated_landmark_keys,
+    landmark_cotyl_from_state_dict, landmark_hidden_from_state_dict, landmark_root_from_state_dict,
+    strip_deprecated_landmark_keys,
 )
+from utils.device import pick_device
+from utils.paths import repo_path
+from utils.landmark_gate import annotate_readout
 from utils.landmark_readout import READOUT_RADIUS, readout_from_fields
+
+log = logging.getLogger(__name__)
 
 CPU_BATCH_SIZE = 4
 
@@ -89,7 +96,7 @@ class MulticlassInference:
         (median 74x246px) and 572 reflect-pads ~94% of each tile with
         synthetic context that patch_size=252 avoids.
         """
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or pick_device()
         self.num_classes = num_classes
         self.in_size = in_size
         self.out_size = out_size
@@ -105,7 +112,7 @@ class MulticlassInference:
         # tensor only ever has its .shape read, never its values.
         self._out_shape_ref = torch.empty(out_size, out_size)
         state_dict = strip_deprecated_landmark_keys(
-            torch.load(checkpoint_path, map_location=self.device, weights_only=True))
+            torch.load(repo_path(checkpoint_path), map_location=self.device, weights_only=True))
         # The two conv_out heads have DIFFERENT state_dict keys (the
         # groupnorm head adds conv_out.2.{weight,bias}), and these
         # checkpoints are bare state_dicts with no architecture metadata, so
@@ -121,7 +128,8 @@ class MulticlassInference:
         self.has_landmarks = has_landmark_head(state_dict)
         self.model = UNetGNRes(n_classes=num_classes, head=self.head, landmark_head=self.has_landmarks,
                                landmark_hidden=landmark_hidden_from_state_dict(state_dict),
-                               landmark_root=landmark_root_from_state_dict(state_dict))
+                               landmark_root=landmark_root_from_state_dict(state_dict),
+                               landmark_cotyl=landmark_cotyl_from_state_dict(state_dict))
         try:
             self.model.load_state_dict(state_dict)
         except RuntimeError:
@@ -276,7 +284,7 @@ class MulticlassInference:
             for img_path in chunk_paths:
                 image = cv2.imread(img_path)
                 if image is None:
-                    print(f"[WARNING] Could not load: {img_path}")
+                    log.warning(f"Could not load: {img_path}")
                     continue
                 valid_paths.append(img_path)
                 images.append(image)
@@ -295,7 +303,8 @@ class MulticlassInference:
     def _run_batch_landmarks(self, tiles):
         """Per tile: (junction probability map, 4 direction-field maps, extra), the maps
         cropped to out_size like the segmentation output; extra is None, or for a
-        collar/root head {"collar_hm", "root_vec"}.
+        collar/root head {"collar_hm", "root_vec"} (plus "base_hm", "tip_hm" for a head with
+        the cotyledon base and tip).
         Same per-tile z-score as _run_batch."""
         batch = np.stack([zscore_normalize(t) for t in tiles]).transpose(0, 3, 1, 2)
         tensor = torch.from_numpy(batch).to(self.device)
@@ -309,6 +318,11 @@ class MulticlassInference:
                 collar = torch.sigmoid(kp[:, 5]).cpu().numpy()
                 root = kp[:, 6:8].cpu().numpy()
                 extra = [{"collar_hm": collar[i], "root_vec": root[i]} for i in range(hm.shape[0])]
+                if kp.shape[1] >= 10:
+                    base = torch.sigmoid(kp[:, 8]).cpu().numpy()
+                    tip = torch.sigmoid(kp[:, 9]).cpu().numpy()
+                    for i, e in enumerate(extra):
+                        e["base_hm"], e["tip_hm"] = base[i], tip[i]
         return [(hm[i], vec[i], extra[i] if extra else None) for i in range(hm.shape[0])]
 
     # Average every landmark map over the crop and its mirror image (x components of the
@@ -323,8 +337,12 @@ class MulticlassInference:
         Returns one entry per image: the dict from
         utils.landmark_readout.readout_from_fields (junction, theta, bio = 180 - theta,
         directions, peak), or None when no junction is found."""
-        return [readout_from_fields(hm, vec, radius=readout_radius, **(extra or {}))
-                for hm, vec, extra in self.predict_landmark_fields(images, flip_tta=flip_tta)]
+        out = []
+        for hm, vec, extra in self.predict_landmark_fields(images, flip_tta=flip_tta):
+            readout = readout_from_fields(hm, vec, radius=readout_radius, **(extra or {}))
+            # Gate fields (utils/landmark_gate.py), additive; a single model has no member spread.
+            out.append(annotate_readout(readout, (extra or {}).get("tip_hm")))
+        return out
 
     def predict_landmark_fields(self, images, flip_tta=None):
         """Landmark maps per crop (see _landmark_fields_once), averaged with the mirrored crop's
@@ -344,6 +362,9 @@ class MulticlassInference:
                 rf[0] *= -1.0
                 merged = {"collar_hm": (extra["collar_hm"] + ef["collar_hm"][:, ::-1]) / 2,
                           "root_vec": (extra["root_vec"] + rf) / 2}
+                for key in ("base_hm", "tip_hm"):
+                    if key in extra and key in ef:
+                        merged[key] = (extra[key] + ef[key][:, ::-1]) / 2
             out.append(((hm + hf[:, ::-1]) / 2, (vec + vf) / 2, merged))
         return out
 
@@ -359,7 +380,7 @@ class MulticlassInference:
             raise RuntimeError("this checkpoint has no landmark head (no conv_kp keys)")
 
         plans, hm_out, vec_out = [], [], []
-        collar_out, root_out = [], []
+        collar_out, root_out, base_out, tip_out = [], [], [], []
         work = []
         for idx, image in enumerate(images):
             orig_h, orig_w = image.shape[:2]
@@ -368,6 +389,8 @@ class MulticlassInference:
             vec_out.append(np.zeros((4, base_h, base_w), dtype=np.float32))
             collar_out.append(np.zeros((base_h, base_w), dtype=np.float32))
             root_out.append(np.zeros((2, base_h, base_w), dtype=np.float32))
+            base_out.append(np.zeros((base_h, base_w), dtype=np.float32))
+            tip_out.append(np.zeros((base_h, base_w), dtype=np.float32))
             plans.append((orig_h, orig_w, base_pad))
             for (x, y) in tile_coords:
                 work.append((idx, x, y, padded[y:y + self.in_size, x:x + self.in_size]))
@@ -380,6 +403,9 @@ class MulticlassInference:
                 if extra is not None:
                     collar_out[idx][y:y + self.out_size, x:x + self.out_size] = extra["collar_hm"]
                     root_out[idx][:, y:y + self.out_size, x:x + self.out_size] = extra["root_vec"]
+                    if "tip_hm" in extra:
+                        base_out[idx][y:y + self.out_size, x:x + self.out_size] = extra["base_hm"]
+                        tip_out[idx][y:y + self.out_size, x:x + self.out_size] = extra["tip_hm"]
 
         results = []
         for idx, (orig_h, orig_w, base_pad) in enumerate(plans):
@@ -390,6 +416,9 @@ class MulticlassInference:
             if self._core().landmark_root:
                 extra = {"collar_hm": _crop_from_pad(collar_out[idx], base_pad),
                          "root_vec": np.stack([_crop_from_pad(root_out[idx][c], base_pad) for c in range(2)])}
+                if self._core().landmark_cotyl:
+                    extra["base_hm"] = _crop_from_pad(base_out[idx], base_pad)
+                    extra["tip_hm"] = _crop_from_pad(tip_out[idx], base_pad)
             results.append((hm, vec, extra))
         return results
 
@@ -405,7 +434,7 @@ class MulticlassInference:
             for img_path in image_paths[start:start + IMAGE_CHUNK]:
                 image = cv2.imread(img_path)
                 if image is None:
-                    print(f"[WARNING] Could not load: {img_path}")
+                    log.warning(f"Could not load: {img_path}")
                     continue
                 paths.append(img_path)
                 images.append(image)
@@ -416,3 +445,87 @@ class MulticlassInference:
                         (hm, vec, extra) if fields
                         else readout_from_fields(hm, vec, radius=readout_radius, **(extra or {})))
         return out
+
+
+def merge_landmark_fields(members):
+    """Average the landmark maps of several checkpoints for one crop, before the readout.
+
+    `members` is a list of (hm, vec, extra) as predict_landmark_fields returns them. The junction
+    heatmap and the two direction fields are averaged over every member; each optional map
+    (collar / root direction, cotyledon base / tip) over the members that have it, so a plain
+    head and a base/tip head can be mixed (the readout then falls back as it does for a single
+    plain head only when no member has base/tip)."""
+    hm = np.mean([m[0] for m in members], axis=0)
+    vec = np.mean([m[1] for m in members], axis=0)
+    extras = [m[2] for m in members if m[2] is not None]
+    merged = None
+    if extras:
+        merged = {}
+        for key in ("collar_hm", "root_vec", "base_hm", "tip_hm"):
+            have = [e[key] for e in extras if key in e]
+            if have:
+                merged[key] = np.mean(have, axis=0)
+    return hm, vec, merged
+
+
+class LandmarkEnsemble:
+    """Several landmark checkpoints read as one: their maps are averaged before the readout.
+
+    Exposes the same predict_landmark_fields / predict_landmarks as MulticlassInference. Each member
+    keeps its own flip averaging (flip_tta, default on). Members are MulticlassInference objects."""
+
+    def __init__(self, members):
+        if not members:
+            raise ValueError("an ensemble needs at least one member")
+        self.members = list(members)
+
+    def predict_landmark_fields(self, images, flip_tta=None):
+        per_member = [m.predict_landmark_fields(images, flip_tta=flip_tta) for m in self.members]
+        return [merge_landmark_fields(list(group)) for group in zip(*per_member)]
+
+    def predict_landmarks(self, images, readout_radius: float = READOUT_RADIUS, flip_tta=None):
+        """Merged readouts (maps averaged over the members, as always) plus the readability-gate
+        fields utils.landmark_gate.annotate_readout adds: tip_peak, member_theta_sd (each member read
+        on its own fields; 90 when any member fails), member_thetas, unreadable_p, unreadable.
+        None where the merged readout is None. Costs no extra forward pass."""
+        per_member = [m.predict_landmark_fields(images, flip_tta=flip_tta) for m in self.members]
+        out = []
+        for group in zip(*per_member):
+            hm, vec, extra = merge_landmark_fields(list(group))
+            readout = readout_from_fields(hm, vec, radius=readout_radius, **(extra or {}))
+            if readout is not None:
+                thetas = []
+                for m_hm, m_vec, m_extra in group:
+                    r = readout_from_fields(m_hm, m_vec, radius=readout_radius, **(m_extra or {}))
+                    thetas.append(None if r is None or r.get("theta") is None else float(r["theta"]))
+                annotate_readout(readout, (extra or {}).get("tip_hm"), thetas)
+            out.append(readout)
+        return out
+
+    @property
+    def has_landmarks(self):
+        return all(m.has_landmarks for m in self.members)
+
+    def predict_files_landmarks(self, image_paths, readout_radius: float = READOUT_RADIUS, flip_tta=None):
+        """{basename: readout dict or None}, like MulticlassInference.predict_files_landmarks."""
+        out = {}
+        for start in range(0, len(image_paths), IMAGE_CHUNK):
+            paths, images = [], []
+            for img_path in image_paths[start:start + IMAGE_CHUNK]:
+                image = cv2.imread(img_path)
+                if image is None:
+                    log.warning(f"Could not load: {img_path}")
+                    continue
+                paths.append(img_path)
+                images.append(image)
+            if images:
+                for img_path, readout in zip(paths, self.predict_landmarks(images, readout_radius, flip_tta)):
+                    out[os.path.basename(img_path)] = readout
+        return out
+
+    @classmethod
+    def from_checkpoints(cls, spec, **kwargs):
+        """An ensemble (or, for one path, the plain model) from checkpoint paths joined by "+"."""
+        paths = [p.strip() for p in spec.split("+") if p.strip()]
+        members = [MulticlassInference(p, **kwargs) for p in paths]
+        return members[0] if len(members) == 1 else cls(members)

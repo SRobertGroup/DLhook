@@ -2,7 +2,7 @@
 # Versions are those of the working dlhook_env (Python 3.10). torch and
 # torchvision are installed separately from the CPU wheel index by the workflow
 # (torch==2.8.0, torchvision==0.23.0 -- keep them in step with the
-# torchvision.transforms.functional_tensor shim in seedling_measurment.py).
+# torchvision.transforms.functional_tensor shim in seedling_measurement.py).
 numpy==2.2.6
 scipy==1.15.3
 pandas==2.3.3

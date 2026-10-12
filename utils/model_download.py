@@ -8,9 +8,12 @@ file that looks valid. Pure stdlib; `url` may be file:// (the tests use that).
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import urllib.request
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def sha256_of(path, chunk=1 << 20) -> str:
@@ -27,7 +30,7 @@ def ensure_file(path, url: str, sha256: str, label: str = "model weights") -> st
         return str(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     part = path.with_name(path.name + ".part")
-    print(f"Downloading {label} to {path} (first use only) from {url}", flush=True)
+    log.info(f"Downloading {label} to {path} (first use only) from {url}")
     try:
         with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as out:
             while True:

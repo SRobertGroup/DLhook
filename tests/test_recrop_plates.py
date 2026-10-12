@@ -24,7 +24,7 @@ from src.recrop_geometry import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Crop-box geometry -- mirrors Gui._compute_crop_box exactly (seedling_measurment.py).
+# Crop-box geometry -- the two-click box formula the GUI used before boxes were drawn directly.
 # ---------------------------------------------------------------------------
 
 def test_compute_crop_box_matches_gui_padding_formula():
@@ -359,3 +359,25 @@ def test_run_real_overwrite_rerun_replaces_only_that_series_rows(tmp_path, monke
     row_a = next(r for r in out_rows if r["series"] == "A")
     assert row_a["source_frame"] == "frame1.png"
     assert row_a["cx"] == "25"  # A's new box, not the old one
+
+
+def test_run_real_skips_an_unreadable_frame_and_keeps_going(tmp_path, monkeypatch, capsys):
+    output_dir = tmp_path / "crops"
+    output_dir.mkdir()
+
+    def read(path):
+        if path.endswith("bad.png"):
+            raise IOError(f"failed to read image: {path}")
+        return np.zeros((50, 50), dtype=np.uint8)
+
+    monkeypatch.setattr(recrop_plates, "read_preprocessed_gray", read)
+    series_path = tmp_path / "S"
+    series_path.mkdir()
+    box = {"cx": 25, "cy": 25, "half_w": 10, "half_h": 10}
+    plan = recrop_plates.SeriesPlan("S", series_path, ["a.png", "bad.png", "c.png"], [box], "test")
+    manifest_path = output_dir / "manifest.csv"
+    assert recrop_plates.run_real([plan], output_dir, manifest_path, overwrite=False, use_superres=False) == 0
+    with open(manifest_path, newline="", encoding="utf-8") as fh:
+        frames = [r["source_frame"] for r in csv.DictReader(fh)]
+    assert frames == ["a.png", "c.png"]                                   # the bad frame is absent, the rest is cut
+    assert "Skipped 1 unreadable frame" in capsys.readouterr().out

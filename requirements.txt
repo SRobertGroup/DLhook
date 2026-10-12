@@ -4,7 +4,7 @@
 # CPU only: drop --extra-index-url. `torch==2.8.0` also matches the `2.8.0+cu128` build.
 # requirements-lock.txt pins every package of that environment, transitive ones included.
 # Keep torch / torchvision in step with the torchvision.transforms.functional_tensor shim in
-# seedling_measurment.py: a torchvision update already broke startup once.
+# seedling_measurement.py: a torchvision update already broke startup once.
 torch==2.8.0
 torchvision==0.23.0
 numpy==2.2.6

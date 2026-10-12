@@ -60,7 +60,7 @@ from pathlib import Path
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-VARIANTS = ("raw", "raw_flip", "recon", "landmark", "landmark_recon", "landmark_temporal")
+VARIANTS = ("raw", "raw_flip", "recon", "landmark", "landmark_recon", "landmark_temporal", "landmark_monotone")
 
 
 # --- pure helpers (unit-tested) ----------------------------------------------
@@ -73,20 +73,34 @@ def fold_angle(value):
     return None if value is None or value != value else 180.0 - abs(value - 180.0)
 
 
-def load_truth(path, fold=True):
+def load_truth(path, fold=True, geometric=False):
     """Measured rows of an annotation CSV, with typed fields. With fold (default) the Overhook flag
-    is dropped: gt = 180 - theta (theta is stored for every frame) and gt_overhook is 0."""
+    is dropped: gt = 180 - theta (theta is stored for every frame) and gt_overhook is 0.
+    With geometric the overhook comes from the clicks themselves: gt_overhook = 1 and gt = 180 + theta when
+    the clicked cotyledon axis (base -> tip) crosses the clicked hypocotyl axis (Landmark.overhook),
+    otherwise gt = 180 - theta."""
+    from utils.angle_review import read_rows
+    flags = {}
+    if geometric:
+        from multi.src.landmarks import load_landmarks
+        flags = {name: lm.overhook for name, lm in load_landmarks(path)[0].items()}
     rows = []
-    with open(path, newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            if row["status"] != "measured":
-                continue
-            bio = float(row["bio_angle"])
-            rows.append({
-                "series": row["series"], "crop_id": int(row["crop_id"]), "frame": row["frame"],
-                "crop_file": row["crop_file"], "gt": fold_angle(bio) if fold else bio,
-                "gt_overhook": 0 if fold else int(row["overhook"] or 0),
-            })
+    for row in read_rows(path):                       # the review sidecar is applied
+        if row["status"] != "measured":
+            continue
+        bio = float(row["bio_angle"])
+        if geometric:
+            over = bool(flags.get(row["crop_file"], False))
+            theta = float(row["theta"])
+            rows.append({"series": row["series"], "crop_id": int(row["crop_id"]), "frame": row["frame"],
+                         "crop_file": row["crop_file"], "gt": 180.0 + theta if over else 180.0 - theta,
+                         "gt_overhook": int(over)})
+            continue
+        rows.append({
+            "series": row["series"], "crop_id": int(row["crop_id"]), "frame": row["frame"],
+            "crop_file": row["crop_file"], "gt": fold_angle(bio) if fold else bio,
+            "gt_overhook": 0 if fold else int(row["overhook"] or 0),
+        })
     return rows
 
 
@@ -175,16 +189,15 @@ def run_backend(name, series, crops_dir, seed_pad):
     every crop of every seedling in `series`, from the real pipeline."""
     import cv2
     from models.segmentation_backends import get_backend
-    from seedling_measurment import Gui
+    from seedling_measurement import Gui
     from utils.mask_store import MaskStore
 
     keys = list(series)
     all_files = [f for k in keys for f in series[k]]
     gui = Gui.__new__(Gui)          # no Tk window, same seam as tests/test_gui_segmentation_routing.py
     gui.mask_store = MaskStore()
-    gui.crop_boxes, gui.seedling_pairs = [], []
-    gui.crop_points_distributed = [None] * len(keys)
-    gui.crop_points_numberID = [None] * len(keys)
+    gui.crop_boxes, gui.collar_overrides = [], []
+    gui.seed_point_proxies = {}
     gui.cotyl_time_series_by_crop, gui.germ_time_series_by_crop = {}, {}
     gui.frame_results_by_crop = {}
 
@@ -207,8 +220,7 @@ def run_backend(name, series, crops_dir, seed_pad):
             files = series[key]
             first = cv2.imread(str(crops_dir / files[0]))
             h, w = first.shape[:2]
-            gui.crop_points_distributed[k] = [proxy_seed_point(w, h, seed_pad)]
-            gui.crop_points_numberID[k] = [k + 1]
+            gui.seed_point_proxies[k] = proxy_seed_point(w, h, seed_pad)
             results = []
             for f in files:
                 try:
@@ -242,17 +254,18 @@ def run_backend(name, series, crops_dir, seed_pad):
     return out
 
 
-def run_landmarks(checkpoint, series, crops_dir):
+def run_landmarks(checkpoint, series, crops_dir, geometric_overhook=False):
     """{(series, crop_id, crop_file): {"landmark", "landmark_recon"}} from a
     landmark-head checkpoint, over the same crop series as run_backend. The
     per-frame angle is the landmark readout's bio value (None when no junction
     is found); landmark_recon runs the same reconstruction the pipeline applies."""
     from models.UNetInference import MARGIN
-    from models.multiclass_inference import MulticlassInference
+    from models.multiclass_inference import LandmarkEnsemble
     from utils.angle_timeseries import reconstruct_series
-    from utils.landmark_timeseries import reconstruct_landmark_series
+    from utils.landmark_timeseries import monotone_opening, reconstruct_landmark_series
 
-    model = MulticlassInference(checkpoint, num_classes=4, in_size=252 + 2 * MARGIN, out_size=252, margin=MARGIN)
+    model = LandmarkEnsemble.from_checkpoints(checkpoint, num_classes=4, in_size=252 + 2 * MARGIN, out_size=252,
+                                              margin=MARGIN)
     if not model.has_landmarks:
         raise SystemExit(f"{checkpoint} has no landmark head (train with multi/configs/training_landmarks.yaml)")
     all_files = [f for files in series.values() for f in files]
@@ -261,21 +274,25 @@ def run_landmarks(checkpoint, series, crops_dir):
 
     out = {}
     for (series_name, crop_id), files in series.items():
-        per_frame = [readouts[f]["bio"] if readouts.get(f) else None for f in files]
+        key = "bio_overhook" if geometric_overhook else "bio"
+        per_frame = [readouts[f][key] if readouts.get(f) else None for f in files]
         with contextlib.redirect_stdout(io.StringIO()):
             recon, _ = reconstruct_series(per_frame)
         temporal = reconstruct_landmark_series([readouts.get(f) for f in files])
-        for f, raw_value, recon_value, temporal_value in zip(files, per_frame, recon, temporal):
+        monotone = monotone_opening(temporal)
+        for f, raw_value, recon_value, temporal_value, monotone_value in zip(files, per_frame, recon, temporal,
+                                                                          monotone):
             out[(series_name, crop_id, f)] = {
                 "landmark": raw_value,
                 "landmark_recon": None if recon_value is None or np.isnan(recon_value) else float(recon_value),
                 "landmark_temporal": None if np.isnan(temporal_value) else float(temporal_value),
+                "landmark_monotone": None if np.isnan(monotone_value) else float(monotone_value),
             }
     return out
 
 
 SERIES_FIELDS = ["series", "crop_id", "frame_idx", "crop_file", "gt", "gt_overhook",
-                 "raw_flip", "recon", "landmark", "landmark_temporal"]
+                 "raw_flip", "recon", "landmark", "landmark_temporal", "landmark_monotone"]
 
 
 def write_series_csv(path, series, truth, full_preds):
@@ -302,7 +319,12 @@ def build_arg_parser():
                    help="Folder of crops with its manifest.csv")
     p.add_argument("--backends", default="binary,multiclass", help="Comma-separated: binary, multiclass")
     p.add_argument("--landmark-checkpoint", default=None,
-                   help="Also score a landmark-head checkpoint (best.pt from training_landmarks.yaml)")
+                   help="Also score landmark-head checkpoints (best.pt from training_landmarks.yaml), comma-separated; "
+                        "a+b+c averages the maps of those checkpoints before the readout (an ensemble)")
+    p.add_argument("--geometric-overhook", action="store_true",
+                   help="score overhook too, found geometrically: the cotyledon axis crosses the hypocotyl axis "
+                        "(truth from your clicks, reading from the landmark head's base -> tip); gt and readings "
+                        "are then 180 + theta when overhooked. Implies --keep-overhook for the readings.")
     p.add_argument("--keep-overhook", action="store_true",
                    help="score against the raw bio angle (180 + theta for Overhook-flagged frames) instead of "
                         "dropping the flag (default: truth = 180 - theta, readings folded below 180)")
@@ -317,7 +339,9 @@ def main(argv=None) -> int:
     sys.path.insert(0, str(_REPO_ROOT))
     os.chdir(_REPO_ROOT)                   # backends resolve weight paths relative to the repo root
     crops_dir = Path(args.crops).resolve()      # run_backend changes directory: a relative path would break
-    truth = load_truth(args.truth, fold=not args.keep_overhook)
+    if args.geometric_overhook:
+        args.keep_overhook = True
+    truth = load_truth(args.truth, fold=not args.keep_overhook, geometric=args.geometric_overhook)
     series = load_series(crops_dir / "manifest.csv", truth)
     print(f"{len(truth)} measured frames, {len(series)} seedlings, "
           f"{sum(len(v) for v in series.values())} crops to run")
@@ -340,26 +364,30 @@ def main(argv=None) -> int:
                 full_preds.setdefault(key, {}).update(
                     {k: p.get(k) for k in ("raw_flip", "recon")})
 
-    if args.landmark_checkpoint:
-        pred = run_landmarks(args.landmark_checkpoint, series, crops_dir)
+    for spec in [s.strip() for s in (args.landmark_checkpoint or "").split(",") if s.strip()]:
+        pred = run_landmarks(spec, series, crops_dir, geometric_overhook=args.geometric_overhook)
         if not args.keep_overhook:
             pred = fold_predictions(pred)
-        name = "landmark:" + Path(args.landmark_checkpoint).parent.name
+        parts = [p.strip() for p in spec.split("+")]
+        name = "landmark:" + ("ens " if len(parts) > 1 else "") + "+".join(
+            Path(p).parent.name.replace("models_landmarks_", "") if len(parts) > 1 else Path(p).parent.name for p in parts)
         rows = []
         for t in truth:
             p = pred.get((t["series"], t["crop_id"], t["crop_file"]), {})
             rows.append({**t, "landmark": p.get("landmark"), "landmark_recon": p.get("landmark_recon"),
-                         "landmark_temporal": p.get("landmark_temporal")})
+                         "landmark_temporal": p.get("landmark_temporal"),
+                         "landmark_monotone": p.get("landmark_monotone")})
         results_by_backend[name] = rows
         csv_rows += [{"backend": name, **r} for r in rows]
         for key, p in pred.items():
             full_preds.setdefault(key, {}).update(
-                {k: p.get(k) for k in ("landmark", "landmark_temporal")})
+                {k: p.get(k) for k in ("landmark", "landmark_temporal", "landmark_monotone")})
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     fields = ["backend", "series", "crop_id", "frame", "crop_file", "gt", "gt_overhook",
-              "raw", "raw_flip", "recon", "state", "landmark", "landmark_recon", "landmark_temporal"]
+              "raw", "raw_flip", "recon", "state", "landmark", "landmark_recon", "landmark_temporal",
+              "landmark_monotone"]
     with open(out_dir / "angle_validation.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()

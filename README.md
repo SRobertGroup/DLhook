@@ -21,21 +21,21 @@
 
 The pipeline has four stages:
 
-1. **Segmentation.** A U-Net with group normalisation and residual connections (`UNetGNRes`, PyTorch) assigns every pixel of each cropped seedling to one of four classes — background, **cotyledon**, **hypocotyl**, or **radicle**. A separate model detects **germination** (the emerging radicle), which fixes time zero for each seedling independently. Earlier versions ran three separate two-class models instead of one four-class model; that path is retained and can still be selected — see [Which segmentation models run](#which-segmentation-models-run).
-2. **Geometry.** For every frame, an algorithm fits the cotyledon and stem, then computes the angle between them (`raw_angle`).
+1. **Segmentation.** A U-Net with group normalisation and residual connections (`UNetGNRes`, PyTorch) segments each cropped seedling into **cotyledon** and **hypocotyl** (the overlays you review and correct, plus the hypocotyl mask that length, curvature and diameter are measured on). A separate learned detector finds **germination** (the emerging radicle), which fixes time zero for each seedling independently; the radicle itself is no longer segmented. Earlier versions ran three separate two-class models and fitted ellipses; both paths are retained and can still be selected — see [Which segmentation models run](#which-segmentation-models-run) and [Which angle method runs](#which-angle-method-runs).
+2. **Geometry.** For every frame, an ensemble of three landmark networks reads the cotyledon/hypocotyl **junction** and the direction of each axis directly from the crop, then computes the angle between them (`raw_angle`). On the hypocotyl mask DLhook also measures its length, curvature and diameter.
 3. **Temporal reconstruction.** Per-frame readings are noisy and periodically ambiguous. A reconstruction pass resolves each frame against the whole series, producing a continuous biological angle (`bio_angle`) and a state (`Closed` / `Opening`).
-4. **Review and export.** Every seedling can be inspected frame by frame, its masks corrected with a brush, and its angle overridden by hand before the results are written to a `.CSV`.
+4. **Review and export.** Every seedling can be inspected frame by frame, its landmarks and angle overridden by hand before the results are written to a `.CSV`.
 
 The network architecture and the trained weights derive from [RootPainter](https://github.com/Abe404/root_painter). Inference runs on [PyTorch](https://pytorch.org/).
 
 ```mermaid
 flowchart LR
     A["Image time series\n(one directory)"] --> B["Per-seedling crops\n(start/end points)"]
-    B --> C1["Cotyledon\nsegmentation"]
-    B --> C2["Hypocotyl\nsegmentation"]
-    B --> C3["Germination\ndetection"]
-    C1 --> D["Per-frame geometry\n(raw_angle)"]
-    C2 --> D
+    B --> C1["Cotyledon + hypocotyl\nsegmentation"]
+    B --> C2["Landmark ensemble\n(junction + directions)"]
+    B --> C3["Germination\ndetection (learned)"]
+    C2 --> D["Per-frame geometry\n(raw_angle, traits)"]
+    C1 --> D
     C3 --> E["Time zero\nper seedling"]
     D --> F["Temporal reconstruction\n(bio_angle, state)"]
     E --> F
@@ -95,7 +95,7 @@ pip3 install --no-cache-dir -r requirements.txt
 Dependencies, all pinned (see [`requirements.txt`](requirements.txt) and [`env.yaml`](env.yaml)): `torch`, `torchvision`, `numpy`, `pandas`, `pillow`, `matplotlib`, `scikit-image`, `opencv-python`, `PyYAML`, `tqdm`, `basicsr` and `realesrgan`.
 
 > [!TIP]
-> A GPU is optional but strongly recommended — segmentation is roughly **8× faster** on CUDA. Match the CUDA version to your driver; `env.yaml` installs the CUDA 12.8 build, which recent GPU generations (Blackwell) need; change `cu128` to `cu126` for an older driver. Super-resolution of the crops only runs when CUDA is available.
+> A GPU is optional but strongly recommended — segmentation is roughly **8× faster** on CUDA. Match the CUDA version to your driver; `env.yaml` installs the CUDA 12.8 build, which recent GPU generations (Blackwell) need; change `cu128` to `cu126` for an older driver. Super-resolution of the crops only runs when CUDA is available. DLhook checks that CUDA actually works (a tiny test operation) before using the GPU and falls back to the CPU with a warning when it does not; `DLHOOK_DEVICE=cpu` forces the CPU.
 
 ### 3. Start DLhook
 
@@ -108,30 +108,48 @@ python main.py
 
 ### Model weights
 
-By default three two-class RootPainter models are loaded at runtime (the `binary` backend):
+The default pipeline needs these files. **None of them is in git** (they are untracked, like `weights/multiclass/`): they must be obtained from the maintainers or copied from the machine that trained them, and put at exactly these paths.
 
-| File | Provides | Purpose |
+| File | Provides | Used for |
 |---|---|---|
-| [`weights/RootPainter_weights/cotyledon_v5.pkl`](weights/RootPainter_weights/) | cotyledon | cotyledon orientation |
-| [`weights/RootPainter_weights/hypocot_v5.pkl`](weights/RootPainter_weights/) | hypocotyl | hypocotyl direction |
-| [`weights/RootPainter_weights/germ_v1.pkl`](weights/RootPainter_weights/) | germination | per-seedling time zero |
+| `weights/landmarks/dlhook_landmarks_{a,b,c}.pt` | landmark ensemble (three members) | the hook angle, junction and axis directions |
+| `weights/multiclass/dlhook_4class_v1.pt` | cotyledon + hypocotyl | the overlays |
+| [`weights/RootPainter_weights/hypocot_v5.pkl`](weights/RootPainter_weights/) | hypocotyl (binary) | the mask the length, curvature and diameter are measured on (the four-class model cuts the hypocotyl in half) |
+| `weights/germination_detector.json` | learned germination detector | per-seedling time zero (it reads the four-class checkpoint above) |
 
-An experimental four-class model is available as an opt-in (see below). It uses these
-weights instead, and they are not all included in a fresh clone:
+**When a file is missing DLhook falls back, with a warning in the console, instead of failing:**
 
-| File | Provides | Purpose |
-|---|---|---|
-| `weights/multiclass/dlhook_4class_v1.pt` | cotyledon + hypocotyl | both classes from one four-class model |
-| `weights/RootPainter_weights/germ_v2.pkl` | germination | per-seedling time zero |
+- no `weights/landmarks/*.pt`: the angle comes from the legacy ellipse fit (see below);
+- no `weights/multiclass/dlhook_4class_v1.pt`: the legacy three binary models run for segmentation;
+- no `weights/germination_detector.json` (or no four-class checkpoint): germination is **unknown**. `germination_frame` is an empty cell and time zero stays unset. Set the frame by hand in the analysis window if you need it.
 
-Germination is kept on its own dedicated model rather than taken from the four-class
-model, because the detected germination frame sets each seedling's time zero and a shift
-there would move every downstream measurement for that seedling.
+Results therefore differ between machines that do not hold the same files: check the console for `WARNING` lines before comparing runs.
 
-A further model, Real-ESRGAN (`models/superres/RealESRGAN_x4plus.pth`), optionally
-super-resolves crops on CUDA. The 64 MB file is not in the repository: it is downloaded from the
+The legacy paths use the three two-class RootPainter models (`cotyledon_v5.pkl`, `hypocot_v5.pkl`, `germ_v1.pkl`, all in [`weights/RootPainter_weights/`](weights/RootPainter_weights/)).
+
+A further model, Real-ESRGAN (`models/superres/RealESRGAN_x4plus.pth`), can super-resolve crops on
+CUDA, but it is **off by default** (`DLHOOK_SUPERRES=1` turns it on): the landmark models were built on plain
+crops, and super-resolved crops raised their validation error from 20.6 to 34.3 degrees. The 64 MB file is not in the repository: it is downloaded from the
 official Real-ESRGAN release on first use and checked against a pinned SHA-256
 (`models/superres/weights_info.py`); a file already at that path is used as is.
+
+### Which angle method runs
+
+Set `DLHOOK_ANGLE_SOURCE` before launching to choose:
+
+| Value | Behaviour |
+|---|---|
+| `landmarks` *(default)* | Three landmark networks (`dlhook_landmarks_{a,b,c}.pt`, flip-averaged) read the junction and the hypocotyl and cotyledon directions on the plain crop. |
+| `ellipse` | The legacy method: ellipses fitted to the cotyledon and hypocotyl masks. |
+
+```bash
+DLHOOK_ANGLE_SOURCE=ellipse python main.py     # legacy ellipse method
+DLHOOK_LANDMARK_GATE=0 python main.py          # keep every landmark reading (no readability gate)
+```
+
+On the final BerryBox v2 validation set (287 hand-measured frames, plants no model had seen) the landmark ensemble has a mean error of **13.9°** (median **7.2°**), against **26.8°** for the ellipse pipeline; repeating your own measurement by hand differs by **4.2°** on average (see [`docs/AUDIT.md`](docs/AUDIT.md), §8). The landmark angle is a folded angle, `180 - theta`; the automatic overhook flag is exported separately and does not change `bio_angle`. Landmarks are read from the plain crop, so they need no segmentation mask: an angle exists even where a mask is empty.
+
+**Readability gate.** The ensemble would otherwise read an angle on frames with no usable information (an annotator would skip them). A logistic gate on the junction peak, the cotyledon-tip peak and the disagreement between the three networks flags such frames: they get no angle (`bio_angle` empty, state `Unreadable`), are never interpolated across, and show the model's rejected reading in grey in the analysis window (you can still place the landmarks by hand, which overrides the gate). On BerryBox v2 it rejects 68% of the skipped frames while keeping 99% of the measured ones. Set `DLHOOK_LANDMARK_GATE=0` before launching to disable it (every frame then keeps its reading; `unreadable_p` is still exported).
 
 ### Which segmentation models run
 
@@ -139,17 +157,14 @@ Set `DLHOOK_SEG_BACKEND` before launching to choose:
 
 | Value | Behaviour |
 |---|---|
-| `binary` *(default)* | Three two-class models: `cotyledon_v5.pkl`, `hypocot_v5.pkl`, `germ_v1.pkl`. |
-| `multiclass` *(experimental)* | Four-class model for cotyledon and hypocotyl, `germ_v2.pkl` for germination. |
+| `multiclass` *(default)* | Four-class model for cotyledon and hypocotyl (the overlays), plus `hypocot_v5.pkl` for the mask the hypocotyl traits use. No radicle mask: germination comes from the learned detector. Falls back to `binary` when `weights/multiclass/dlhook_4class_v1.pt` is missing. |
+| `binary` *(legacy)* | Three two-class models: `cotyledon_v5.pkl`, `hypocot_v5.pkl`, `germ_v1.pkl`, unchanged from earlier versions. |
 
 ```bash
-DLHOOK_SEG_BACKEND=multiclass python main.py     # try the four-class model
+DLHOOK_SEG_BACKEND=binary python main.py     # legacy three-model path
 ```
 
-`binary` stays the default until the four-class model has been validated: its precision
-against human annotations is still well below the binary models' (see
-[`docs/AUDIT.md`](docs/AUDIT.md), finding H-5). Use `multiclass` to compare the two
-directly. The value is read once when the application starts, so it cannot be changed
+With no radicle mask the area-rule germination fallback is unavailable: when the learned detector cannot run, germination is reported as **unknown** (empty cell, with a warning) rather than guessed. The value is read once when the application starts, so it cannot be changed
 part-way through a session — this is deliberate, so that one set of results can never mix
 output from two different models. An unrecognised value stops the program with an error
 rather than silently falling back.
@@ -169,10 +184,7 @@ images_folder
    |-- ...
 ```
 
-**Accepted extensions:** `.tif`, `.png`, `.jpg`, `.bmp`.
-
-> [!IMPORTANT]
-> The extension must be exactly four characters. `.tiff` and `.jpeg` will produce malformed output filenames — rename them to `.tif` / `.jpg` first.
+**Accepted extensions:** `.tif`, `.tiff`, `.png`, `.jpg`, `.jpeg`, `.bmp` (any case).
 
 **Frame ordering.** DLhook orders the series by the **capture time embedded in each file** (EXIF sub-IFD `DateTimeOriginal` / `DateTimeDigitized`, or TIFF tag 306), taking the earliest timestamp present. It falls back to the first integer found in the filename only when the embedded times are missing or unusable. Filesystem creation and modification times are deliberately **not** used — they are frequently identical across a whole series and therefore meaningless as an ordering key.
 
@@ -182,38 +194,46 @@ If the timestamps cannot be trusted — any frame missing one, or the series not
 
 ## Workflow
 
-Load a directory, place two points per seedling, and run the analysis. The sidebar is numbered 1–6 in the order you use it.
+Load a directory, draw one box per seedling, and run the analysis. The sidebar is grouped as **Images**, **Seedlings**, **Analysis** and **Settings**; the window and the canvas can be resized.
 
 ![DLhook main window](docs/img/gui-overview.png)
 
 ### Loading the series
 
-Click **`Open image directory`** and select the folder containing one time series. The frames appear in the list, in acquisition order. Select any frame and click **`Show image`** to display it.
+Click **`Open image directory`** and select the folder containing one time series. The frames appear in the list, in acquisition order, and the last frame is shown at its native resolution. Select any other frame in the list to display it; the boxes and the zoom stay where they are. Opening another folder starts a new series (you are asked first if that would discard boxes or results).
 
-### 1. `Place points`
+### 1. Draw the crop boxes
 
-Work on the **last frame** of the series, where the seedlings are most developed. Each seedling needs **two clicks**:
+Work on the **last frame** of the series, where the seedlings are most developed. The canvas works like `python -m multi.draw_crops`:
 
-- **Start point** (dark blue) — just above the seed coat.
-- **End point** (purple) — at the apical hook.
+| Action | Result |
+|---|---|
+| **Drag** on empty space | Draw a seedling: drag over its visible extent (seed coat to hook tip). The padded crop box is shown live and is the box that is stored. |
+| **Drag** a box | Move it. |
+| **Click** a box | Select it. Drag a **corner handle** of the selected box to resize it. |
+| **`Delete`** / **`Backspace`** (or `Delete selected`) | Delete the selected box. |
+| **`Esc`** | Deselect. |
+| **Mouse wheel** | Zoom at the cursor. **Right-drag** (or middle-drag) pans, **`R`** (or `Reset zoom`) fits the whole image. |
 
-As soon as a pair is complete, DLhook derives a crop box around it automatically. Repeat for every seedling you want to measure, in any order.
+- **Boxes are highlighted, not trimmed, when they overlap.** Overlapping boxes are outlined in **magenta** and the status line below the canvas names them (for example `OVERLAP: 2 & 3`). Boxes are clamped to the image.
+- **Each box shows its seedling ID** in its top-left corner. IDs are numbered across the plate **top-to-bottom, then left-to-right**, and renumbered whenever a box is added, moved or removed. This number is the `seedling_id` in the exported CSV and the number in *Preview seedling*. If results already exist, changing a box asks for confirmation and then clears them, because the results are tied to the box numbers.
+- The status line also shows the number of seedlings, the number of collar overrides and the current frame.
 
-- **Boxes never overlap.** When a new box overlaps a neighbour, both are trimmed back to the midline of the gap between the two seedlings' clicked points. A box is never trimmed inside its own points. If two seedlings' points actually cross, the boxes cannot be separated: they are outlined in **red** and the status bar names them.
-- **Each box shows its seedling ID** in its top-left corner. IDs are numbered across the plate **top-to-bottom, then left-to-right**, and renumbered as you add or remove seedlings. This number is the `seedling_id` in the exported CSV and the number in *Preview seedling*.
+### 2. Optional collar, save and load boxes
 
-> Press **`z`** to undo the last click or the most recently placed pair. This works even if that seedling has since been renumbered.
+**Collar (optional).** Everything below the seedling's collar (the seed coat or root side) can be cut off from the masks. By default DLhook uses the collar that the landmark model finds in each frame, and masks nothing when it finds none. To fix the collar of one seedling yourself, **Shift+click inside its box**: a purple dot marks it (Shift+drag moves it; the dot travels with the box). **Shift+right-click** inside the box, or `Clear collar`, removes the override. Collar overrides apply to every frame of that seedling.
 
-### 2. `Adjust crop`
+**Save boxes… / Load boxes….** The boxes are saved as JSON in the format of `multi/draw_crops.py` and `multi/recrop_plates.py`, keyed by the image folder name, with the optional collar as `"collar": [x, y]` in image pixels:
 
-The crop boxes are already positioned from your point pairs; this step is only for correcting them. Toggle **`Adjust crop`** on, then drag any box's **four corner handles** to resize or reposition it. A resize stops at a neighbouring box and at the image border, and IDs stay fixed while you adjust. Each seedling has its own independently sized box at native image resolution — nothing is scaled or stretched.
+```json
+{"plate_one": [{"cx": 428, "cy": 783, "half_w": 120, "half_h": 90, "collar": [430, 850]}]}
+```
 
-> [!IMPORTANT]
-> Toggle **`Adjust crop`** back **off** when you are finished. Steps 3–6 stay disabled until you do.
+Saving to an existing file replaces only this folder's entry. When loading, the series named like the open folder is used; a file with a single series is used as is; otherwise you are asked which series to load.
 
 ### 3. `Start Analysis`
 
-Runs segmentation across every frame and every crop, then computes the per-frame angles. Progress is shown in the bar at the bottom of the window: cropping occupies the first 30%, segmentation and angle computation the remainder.
+Runs segmentation and the landmark ensemble across every frame and every crop, then computes the per-frame angles and hypocotyl traits. Progress is shown in the bar at the bottom of the window: cropping occupies the first 30%, segmentation and angle computation the remainder.
 
 When it finishes, the status reads *"Analysis complete -- use Preview seedling to review, or Export results when done"*.
 
@@ -225,18 +245,32 @@ Opens a picker; choose a seedling to open its **`Seedling N - analysis`** window
 
 **Viewing**
 - `Launch segmentation` — only needed if this seedling has not been segmented yet.
-- `Show:` `Cotyledon` (green) · `Hypocotyl` (orange) · `Germination` (magenta, off by default).
+- `Show:` `Cotyledon` (green alpha contour) · `Hypocotyl` (yellow smoothed midline) · `Landmarks` (junction, axes and arrows of the current reading, model or manual) · `Germination` (magenta contour, off by default; only shown with the legacy `binary` backend, which still segments the radicle).
 - `<--` / `-->` step through frames.
 - `Zoom +` / `Zoom -` / `Reset zoom`, or the mouse wheel.
 
-**Correcting the masks**
-- Pick `Edit mask:` `Cotyledon` or `Hypocotyl`, set `Brush size`, then paint on the image.
-- **`a`** = add, **`e`** = erase, **`z`** = undo the last stroke. The current mode is shown as *Brush: ADD*.
-- Click `Recompute angle` to re-measure the frame from the edited masks.
+The raw image is shown at full intensity; the overlays are thin lines only, so you can judge the angle against the pixels. There is no mask editing.
 
-**Overriding the angle by hand**
-- `Place angle` then three clicks defining the angle. Tick `Overhook` first if the cotyledon has folded back past closed.
-- `Replace angle` to redo it, `Blank this frame` to discard the frame's measurement entirely — use this when the seedling has rotated so the cotyledon sits in front of or behind the hypocotyl, since a 2D image cannot yield a correct angle in that case.
+**Overriding the angle by hand (landmarks)**
+
+`Place landmarks`, then click on the image, in this order:
+
+1. **J**: the junction where the cotyledons meet the hypocotyl,
+2. **H1**, **H2**: two points on the hypocotyl midline (the axis is oriented away from the junction, so their order does not matter),
+3. **C1**: the cotyledon **base**, at the junction,
+4. **C2**: the cotyledon **tip** (once the two cotyledons have separated, the midpoint between the two tips),
+5. optional **collar**: the hypocotyl/root junction; it ends the length measurement there,
+6. optional **root** point: a second point that gives the root direction.
+
+The prompt in the status line names the next click. The angle is complete after C2; `Enter` applies the landmarks (the two optional points can be left out), `BackSpace` undoes the last point and `Escape` resets. Anywhere in the window, `←` / `→` step through the frames and `↑` / `↓` (or the `▲ Seedling` / `Seedling ▼` buttons) open the previous / next seedling at the same frame, in the same place on screen. Once C2 is placed, the `Overhook` box is **ticked automatically** when the cotyledon ray crosses the hypocotyl ray (the same test as for the model's reading); you can still tick or untick it. `Apply landmarks` commits the frame as **Manual** (an overhooked hook is stored as `180 + theta`, otherwise `180 - theta`), recomputes the hypocotyl traits with your collar (or the model's) and re-reconstructs the series around your frame. `Blank this frame` discards the frame's measurement entirely — use it when the seedling has rotated so the cotyledon sits in front of or behind the hypocotyl, since a 2D image cannot yield a correct angle in that case.
+
+**Saving corrections for retraining.** Tick `Save edits for retraining` (you are asked for a folder once). Each `Apply landmarks` then writes a JSON record (the clicked points, the overhook tick, the model reading it replaced) and a copy of the crop to that folder,. Convert the records into annotation CSVs and a crop folder that the landmark training code reads with
+
+```bash
+python -m multi.edits_to_csv path/to/landmark_edits --out-prefix angle_edits
+```
+
+and add the result to `landmarks.extra_sources` in the training config (see [Training a landmark head](#training-a-landmark-head-from-your-annotations)). A frame edited twice keeps its latest record.
 
 **Germination**
 - The detected frame is shown; `Set to this frame` overrides it, `Apply to all seedlings` propagates it, `Clear` removes it.
@@ -259,27 +293,60 @@ The plot does not auto-update; click `Refresh` after making corrections.
 
 Choose a destination and DLhook writes the `.CSV`. Any seedling never opened in step 4 is segmented now, so exporting is safe even if you only reviewed a subset. Germination detection and temporal reconstruction run as part of the export.
 
+**Physical scale (optional).** Before exporting, type the image scale in **`Scale (µm/px)`** in the sidebar, or click **`Calibrate scale…`**, click the two ends of an object of known length on the first frame (a ruler, a grid square) and enter its length in mm. The scale is kept for the session. Without a scale the CSV holds pixel values only; with one it gains the `*_mm` columns below.
+
 ---
 
 ## Output
 
-The exported CSV is in **long format** — one row per seedling per frame:
+The exported CSV is in **long format** — one row per seedling per frame. The first seven columns are unchanged from earlier versions and keep their order; the landmark and hypocotyl columns follow them.
 
 | Column | Description |
 |---|---|
 | `img_name` | source image filename |
 | `seedling_id` | seedling number, 1-based |
 | `raw_angle` | the unmodified per-frame geometric reading, for auditing |
-| `state` | `Closed`, `Opening`, or `Manual` (a hand-placed angle) |
+| `state` | `Closed`, `Opening`, `Manual` (a hand-placed angle), or `Unreadable` (landmark frame rejected by the readability gate: no angle) |
 | `bio_angle` | the reconstructed biological angle — **use this one** |
 | `time_elapsed_min` | time (min) |
-| `germination_frame` | frame which display germination of seedling | 
+| `germination_frame` | frame at which germination of the seedling was detected (empty when unknown) |
+
+**Landmark columns.** All positions are in **crop pixels**, in the pixel frame of that seedling's crop (origin top-left, x to the right, y down). Directions are **unit vectors** in the same image coordinates (y down). Cells are empty when the value does not exist for that frame (for example `collar_*` when no collar was found or clicked).
+
+| Column | Description |
+|---|---|
+| `angle_source` | `landmarks` or `ellipse`: the method that produced the reading |
+| `landmark_edit` | `model` (the network's reading) or `manual` (placed in the analysis window) |
+| `landmark_peak` | strength of the junction heatmap peak |
+| `overhook_flag` | 1 when the cotyledon ray crosses the hypocotyl ray (overhooked), else 0. It is informational: **it does not change `bio_angle`**, which stays `180 - theta` (a manual edit with `Overhook` ticked stores `180 + theta`) |
+| `unreadable_p` | probability that the frame carries no usable information (readability gate; empty for manual frames) |
+| `unreadable` | 1 when the gate rejected the frame (then `bio_angle` is empty and `state` is `Unreadable`), else 0 |
+| `junction_x`, `junction_y` | the cotyledon/hypocotyl junction |
+| `hypo_dir_x`, `hypo_dir_y` | direction of the hypocotyl axis, away from the junction |
+| `cotyl_dir_x`, `cotyl_dir_y` | direction of the cotyledon axis, base to tip |
+| `cotyl_base_x`, `cotyl_base_y`, `cotyl_tip_x`, `cotyl_tip_y` | cotyledon base and tip |
+| `collar_x`, `collar_y` | hypocotyl/root junction (collar), when available |
+| `root_dir_x`, `root_dir_y` | root direction, when available |
+
+**Hypocotyl traits** (measured on the binary `hypocot_v5` hypocotyl mask; empty when there is no mask or no junction):
+
+| Column | Description |
+|---|---|
+| `hypocotyl_length_px` | length in pixels, from the junction to the collar along the midline (skeleton path) of the hypocotyl mask. With no collar it runs to the end of the mask |
+| `hypocotyl_length_truncated` | `True` when there is no collar and the midline touches the crop border, so the length is a lower bound |
+| `hypocotyl_curvature_mean`, `hypocotyl_curvature_max` | mean and maximum of the absolute curvature \|κ\| of the smoothed midline, in 1/px (the first and last 5 px are dropped) |
+| `hypocotyl_diameter_px` | diameter in pixels: the median width of transects perpendicular to the midline, taken every 5 px along its inner 80% |
+
+**Millimetre columns**, written only when a scale is set: `hypocotyl_length_mm`, `hypocotyl_diameter_mm`, `hypocotyl_curvature_mean_per_mm`, `hypocotyl_curvature_max_per_mm`. The pixel columns are always written.
+
+> [!NOTE]
+> The hypocotyl traits are **not yet validated** against hand measurements. Treat absolute values with care until they have been compared with manual length and diameter readings.
 
 ```csv
-img_name,seedling_id,raw_angle,state,bio_angle,time_elapsed_min,germination_frame 
-Col0_001.tif,1,178,Closed,179,0,,
-Col0_001.tif,2,175,Closed,176,60,,
-Col0_002.tif,1,172,Closed,174,120,,
+img_name,seedling_id,raw_angle,state,bio_angle,time_elapsed_min,germination_frame,angle_source,landmark_edit,landmark_peak,overhook_flag,unreadable_p,unreadable,junction_x,junction_y,...
+Col0_001.tif,1,178,Closed,179,0,,landmarks,model,0.93,0,36.2,41.5,...
+Col0_001.tif,2,175,Closed,176,60,,landmarks,model,0.91,0,30.8,38.0,...
+Col0_002.tif,1,172,Closed,174,120,,landmarks,model,0.95,0,36.4,41.1,...
 ```
 
 Missing or unmeasurable values are written as empty strings.
@@ -301,7 +368,7 @@ python -m ui.angle_annotator --folder path/to/crops     # crops named {id}-crop-
 python -m ui.angle_annotator --folder path/to/crops --per-seedling 15 --seed 1
 ```
 
-DLhook writes the crops to `data/images/` during *Start Analysis*, but wipes `data/` at startup and exit, so copy them to a folder of your own first if you want to annotate across sessions.
+DLhook writes the plain (not super-resolved) crops to `data/images/` during *Start Analysis*, but wipes `data/` at startup and exit, so copy them to a folder of your own first if you want to annotate across sessions.
 
 You can also annotate the crops used to train the four-class model (`cropped_training_set/`, made by `multi/recrop_plates.py`). Its `manifest.csv` is picked up automatically, which keeps each series' seedlings apart (`crop_id` repeats across series) and records the source frame as `img_name`. Add `--split val` to keep only images the four-class model never trained on, which is the unbiased set to validate it with:
 
@@ -321,6 +388,21 @@ To compare your measurements with the pipeline, run `python -m multi.validate_an
 
 Frames are a reproducible random sample (`--per-seedling`, `--seed`), grouped by seedling and shuffled within it so you cannot be guided by time order. Results go to `angle_ground_truth.csv` in the repository root (change with `--out`). The file is saved after every frame, and the tool resumes where you stopped. `bio_angle` uses the same convention as the exported CSV (180 = closed, decreasing as the hook opens, above 180 = overhooked), and `seedling_id` and `frame` match the crop file names (plus `series` and `img_name` for the training crops), so the two can be joined directly.
 
+## Reviewing earlier annotations
+
+`python -m ui.angle_reviewer` re-opens frames you already measured, to fix a mistake or to mark a frame where no angle can be measured, without touching the original CSV. Decisions go to `<csv>.review.csv`, and the training and scoring code applies it on top of the original (`utils/angle_review.py`).
+
+```bash
+# measured frames, the ones the model disagrees with most first
+python -m multi.validate_landmarks --truth angle_landmarks_train.csv --folder cropped_training_set --checkpoints multi/results/models_landmarks_v6/best.pt --per-crop-out multi/results/review_errors/train
+python -m ui.angle_reviewer --folder cropped_training_set --csv angle_landmarks_train.csv --errors multi/results/review_errors/train/models_landmarks_v6.csv
+
+# frames you skipped after the seedling germinated (before germination there is nothing to measure)
+python -m ui.angle_reviewer --folder cropped_training_set --csv angle_landmarks_train.csv --skipped --germination germination_train.csv
+```
+
+Each frame opens with your five clicks. `Enter` keeps them (or saves five you re-clicked after `X`), `R` marks **rotation** (the cotyledons pass in front of or behind the hypocotyl, so no angle is measured), `N` marks **no angle** for another reason, `S` / `Right` moves on without recording anything. The tool resumes where you stopped.
+
 ## Training a landmark head from your annotations
 
 The same clicks can retrain the four-class model to find the cotyledon/hypocotyl **junction** and the two axis directions directly, instead of fitting ellipses. That removes the direction ambiguity of an ellipse. The landmark angle is always `180 - theta`: there is no overhook reading, because overhooked frames sit only a few degrees past 180° (median 6.5°), below the repeatability of the clicks themselves (your own repeat measurements differ by about 4° at the median, and the overhook call by 8%).
@@ -335,7 +417,7 @@ Aim for at least 400 measured frames spread over the series. Click the same way 
 
 - **junction**: the joint where the cotyledons meet the hypocotyl;
 - **hypocotyl** points: on the midline of the stem just below the junction;
-- **cotyledon** points: on the midline of the cotyledon, starting at the junction;
+- **cotyledon** points: on the midline of the cotyledon. The **first** click is its **base**, at the junction, and the **last** click is its **tip** (once the two cotyledons have separated, the midpoint between the two tips). The model reads the cotyledon direction as base to tip, which is what tells an open hook from a closed one;
 - the **Overhook** tick is still recorded in the CSV but ignored by landmark training and by `multi/validate_angles.py` (which scores against `180 - theta`; `--keep-overhook` restores the raw angle).
 
 `--split train` keeps your frames out of the validation split, and the training code drops any validation-split crop it finds in the CSV anyway, so `angle_ground_truth.csv` stays a clean test set.
@@ -354,11 +436,15 @@ The first epochs train only the new head, then the whole network. The best epoch
 python -m multi.validate_angles --backends multiclass --landmark-checkpoint multi/results/models_landmarks/best.pt
 ```
 
-The landmark readings appear as `landmark` (per frame) and `landmark_recon` (after reconstruction). The GUI still uses the ellipse pipeline; switching it to landmarks is a separate step to take only if these numbers are better.
+The landmark readings appear as `landmark` (per frame) and `landmark_recon` (after reconstruction). The GUI now uses this ensemble by default (see [Which angle method runs](#which-angle-method-runs)); `DLHOOK_ANGLE_SOURCE=ellipse` restores the ellipse method.
 
 ## Advanced
 
-**Debug Mode** (checkbox, on by default). When switched **off**, DLhook dumps `data/json_data/json_data.json` and a timestamped copy of your placed points to `data/debug_data/output/`. When **on**, it reads previously saved points back from `data/debug_data/input/`, which is useful for re-running the same plate without re-clicking.
+**Debug Mode** (checkbox, off by default) logs what the germination detector measured for each seedling.
+
+**Console output.** DLhook logs through Python's `logging` module. `DLHOOK_LOG_LEVEL=DEBUG python main.py` also shows the per-frame details (contours, angles); `DLHOOK_LOG_LEVEL=WARNING` keeps only problems.
+
+**Where files go.** Weights are found relative to the repository, so `python <path-to-DLhook>/main.py` works from any directory. The session's scratch files (crops, mask dumps) go to `data/` inside the repository, or to `DLHOOK_DATA_DIR` when that is set; they are wiped at start and exit.
 
 **Dumping masks.** Masks are kept in memory. To also write them to `data/predict/` as PNGs:
 
@@ -366,14 +452,14 @@ The landmark readings appear as `landmark` (per frame) and `landmark_recon` (aft
 DLHOOK_DUMP_MASKS=1 python main.py
 ```
 
-**Tests.** About 250 tests cover the angle reconstruction, capture-time parsing, germination detection, brush editing, crop-box layout, segmentation backends and the `multi/` training pipeline. No GPU or image data is needed:
+**Tests.** About 540 tests cover the angle reconstruction, capture-time parsing, germination detection, crop-box layout, segmentation backends and the `multi/` training pipeline. No GPU or image data is needed:
 
 ```bash
 pytest
 ```
 
 > [!CAUTION]
-> The `torchvision.transforms.functional_tensor` shim at the top of `seedling_measurment.py` is load-bearing. It keeps `basicsr` / `realesrgan` importable on current torchvision versions — removing it breaks startup.
+> The `torchvision.transforms.functional_tensor` shim at the top of `seedling_measurement.py` is load-bearing. It keeps `basicsr` / `realesrgan` importable on current torchvision versions — removing it breaks startup.
 
 ---
 
@@ -382,8 +468,8 @@ pytest
 DLhook v0.3.0 is a **pre-release**. It is usable and in active development, but the following are known and unresolved:
 
 - **Germination timing is not validated.** Detection thresholds were tuned only on a few seedlings. The detected germination *frame* has never pass a good quality-check. Verify time zero manually for your own material.
-- **Point placement in the main window is imprecise.** The main canvas stretches every image to a fixed 1100×650 regardless of aspect ratio, and the canvas-to-image mapping is a per-axis stretch rounded to whole pixels. Placement is accurate in the per-seedling window (step 4), which preserves aspect ratio; treat step 1 as coarse positioning.
-- **Super-resolution adds a tiny fraction of detail** The 4× output is immediately resampled back to native size, so there is nothing extra to zoom into.
+- **Super-resolution is opt-in and adds a tiny fraction of detail** (`DLHOOK_SUPERRES=1`, CUDA only). The 4× output is immediately resampled back to native size, so there is nothing extra to zoom into.
+- **Hypocotyl length, curvature and diameter are not validated.** They have not been compared with hand measurements yet. Each frame also costs three landmark networks with flip averaging (six forward passes), which is slow on CPU.
 - **GPU and CPU results are not bit-identical** — roughly 1 pixel in 86,000 (0.001%) can differ.
 
 ---

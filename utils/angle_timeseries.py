@@ -128,6 +128,7 @@ FLOOR_CLOSED_ANGLE = False
 CLOSED_STATE = "Closed"
 OPENING_STATE = "Opening"
 MANUAL_STATE = "Manual"
+UNREADABLE_STATE = "Unreadable"   # landmark frame the readability gate rejected (no information)
 
 
 def _is_missing(value):
@@ -312,7 +313,7 @@ def _smooth(values, protect_mask, window=SMOOTH_WINDOW):
     return out
 
 
-def _classify_states(values, manual_mask):
+def classify_states(values, manual_mask):
     """
     Hysteresis + monotone state machine: starts Closed (a dark-grown hook
     forms closed), switches to Opening only once the angle has stayed below
@@ -343,6 +344,9 @@ def _classify_states(values, manual_mask):
         states[i] = MANUAL_STATE if manual_mask[i] else current
 
     return states
+
+
+_classify_states = classify_states      # old private name, kept for existing importers
 
 
 def _floor_closed_angle(values, states):
@@ -385,7 +389,7 @@ def reconstruct_series(angles, is_manual=None):
     resolved = _align_branches(angles, manual_mask)
     filtered = _hampel_filter(resolved, manual_mask)
     smoothed = _smooth(filtered, manual_mask)
-    states = _classify_states(smoothed, manual_mask)
+    states = classify_states(smoothed, manual_mask)
 
     if FLOOR_CLOSED_ANGLE:
         smoothed = _floor_closed_angle(smoothed, states)

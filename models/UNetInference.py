@@ -1,3 +1,4 @@
+import logging
 import os
 from math import ceil
 import cv2
@@ -5,6 +6,10 @@ import torch
 import numpy as np
 from torch.nn.functional import softmax
 from models.unet import UNetGNRes
+from utils.device import pick_device
+from utils.paths import repo_path
+
+log = logging.getLogger(__name__)
 
 # DLhook's UNetGNRes uses same-padding (3x3, padding=1) convs, but its
 # MaxPool2d stages still floor-divide non-16-divisible sizes, so a 572x572
@@ -100,14 +105,14 @@ def get_predictor(model_path, **kwargs):
 
 class UNetInference:
     def __init__(self, model_path, batch_size=None, half=False):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = pick_device()
         # FP16 only ever makes sense on CUDA; ignore the flag on CPU.
         self.half = bool(half) and self.device.type == "cuda"
         self.model = UNetGNRes()
         self._load_model(model_path)
         self.model.eval()
         self.batch_size = batch_size if batch_size else self._auto_batch_size()
-        print(f"[INFO] UNetInference {os.path.basename(model_path)}: "
+        log.info(f"UNetInference {os.path.basename(model_path)}: "
               f"device={self.device.type}, batch_size={self.batch_size}, half={self.half}")
 
     def _auto_batch_size(self):
@@ -119,7 +124,7 @@ class UNetInference:
         try:
             free_bytes, _total = torch.cuda.mem_get_info(self.device)
         except Exception as e:
-            print(f"[WARNING] Could not query CUDA memory ({e}); using batch size 1")
+            log.warning(f"Could not query CUDA memory ({e}); using batch size 1")
             return 1
         budget = int(free_bytes * _VRAM_SAFETY_FRACTION)
         # A single tile's activations use less memory in fp16.
@@ -127,7 +132,9 @@ class UNetInference:
         return int(max(1, min(MAX_BATCH, budget // per_tile)))
 
     def _load_model(self, model_path):
-        state_dict = torch.load(model_path, map_location=self.device)
+        # weights_only: the RootPainter .pkl files are plain state_dicts, and a tampered file must not
+        # be able to run code on unpickling.
+        state_dict = torch.load(repo_path(model_path), map_location=self.device, weights_only=True)
         try:
             self.model.load_state_dict(state_dict)
         except RuntimeError:
@@ -241,7 +248,7 @@ class UNetInference:
             for img_path in chunk_paths:
                 image = cv2.imread(img_path)
                 if image is None:
-                    print(f"[WARNING] Could not load: {img_path}")
+                    log.warning(f"Could not load: {img_path}")
                     continue
                 valid_paths.append(img_path)
                 images.append(image)
@@ -253,5 +260,5 @@ class UNetInference:
             for img_path, prob in zip(valid_paths, prob_maps):
                 masks[os.path.basename(img_path)] = self._to_binary_mask(prob)
 
-        print(f"[INFO] Segmented {len(masks)} frames (label {label})")
+        log.info(f"Segmented {len(masks)} frames (label {label})")
         return masks

@@ -25,6 +25,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from utils.paths import repo_path
+
 FEATURE_NAMES = ["r_max", "r_top20", "r_log_mass", "r_log_n50", "r_log_n20", "c_log_mass", "h_log_mass"]
 
 
@@ -49,7 +51,8 @@ class GerminationModel:
 
     @classmethod
     def load(cls, path):
-        data = json.loads(open(path, encoding="utf-8").read())
+        with open(repo_path(path), encoding="utf-8") as f:
+            data = json.loads(f.read())
         if data.get("features") != FEATURE_NAMES:
             raise ValueError(f"{path} was fitted on features {data.get('features')}, expected {FEATURE_NAMES}")
         return cls(np.asarray(data["mean"], float), np.asarray(data["std"], float),

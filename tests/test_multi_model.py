@@ -25,7 +25,7 @@ def test_default_unetgnres_still_loads_a_shipped_checkpoint():
     model = UNetGNRes()
     assert model.conv_out[0].out_channels == 2
 
-    state_dict = torch.load(SHIPPED_CHECKPOINT, map_location="cpu")
+    state_dict = torch.load(SHIPPED_CHECKPOINT, map_location="cpu", weights_only=True)
     try:
         model.load_state_dict(state_dict)
     except RuntimeError:
@@ -164,7 +164,7 @@ def test_head_from_state_dict_infers_the_head_from_the_keys_alone():
     assert head_from_state_dict(prefixed_gn) == "groupnorm"
 
     # And the real shipped binary checkpoints, which predate the parameter.
-    assert head_from_state_dict(torch.load(SHIPPED_CHECKPOINT, map_location="cpu")) == "groupnorm"
+    assert head_from_state_dict(torch.load(SHIPPED_CHECKPOINT, map_location="cpu", weights_only=True)) == "groupnorm"
 
 
 def test_warm_start_skips_conv_out_for_the_plain_head_too():

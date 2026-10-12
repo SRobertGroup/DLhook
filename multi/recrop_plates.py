@@ -6,7 +6,7 @@ constructing any Tk widgets or loading CUDA/superres models.
 
 This is a data-prep CLI, run from the dlhook_env (needs cv2/numpy/skimage/
 PIL -- the same stack utils/preprocess_model_input.py uses). It does NOT
-import seedling_measurment.py/ui/* (Tk + heavy model imports at class-init
+import seedling_measurement.py/ui/* (Tk + heavy model imports at class-init
 time) or utils/mask_store.py -- per CLAUDE.md, those are off limits.
 
 Automatic row/seedling detection has been removed. Crop geometry (cx, cy,
@@ -47,7 +47,7 @@ from pathlib import Path
 # multi/ on sys.path so `from src...` resolves to multi/src (matches
 # multi/build_patch_index.py's convention); the repo root on sys.path so
 # `utils.preprocess_model_input` (a plain, Tk-free utility) is importable
-# without importing seedling_measurment.py itself.
+# without importing seedling_measurement.py itself.
 _MULTI_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _MULTI_DIR.parent
 sys.path.insert(0, str(_MULTI_DIR))
@@ -320,11 +320,19 @@ def run_real(series_plans, output_dir: Path, manifest_path: Path, overwrite: boo
     manifest_rows = []
     frame_cache_key = None
     frame_gray = None
+    skipped_frames = []
     for series, series_path, frame, box, crop_id, out_path in plan_rows:
         cache_key = (series_path, frame)
         if cache_key != frame_cache_key:
-            frame_gray = read_preprocessed_gray(str(series_path / frame))
             frame_cache_key = cache_key
+            try:
+                frame_gray = read_preprocessed_gray(str(series_path / frame))
+            except IOError as exc:                      # a corrupt capture must not abort the whole run
+                frame_gray = None
+                print(f"[WARN] skipping unreadable frame: {exc}")
+                skipped_frames.append(str(series_path / frame))
+        if frame_gray is None:
+            continue
 
         crop, x1, y1, x2, y2 = crop_from_box(frame_gray, box)
 
@@ -365,6 +373,8 @@ def run_real(series_plans, output_dir: Path, manifest_path: Path, overwrite: boo
         writer.writerows(preserved_rows + manifest_rows)
 
     print(f"Wrote {len(manifest_rows)} crops to {output_dir}")
+    if skipped_frames:
+        print(f"Skipped {len(skipped_frames)} unreadable frame(s): " + ", ".join(sorted(set(skipped_frames))))
     if preserved_rows:
         print(f"Preserved {len(preserved_rows)} existing manifest rows from other series.")
     print(f"Manifest: {manifest_path}")

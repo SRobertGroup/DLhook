@@ -100,7 +100,7 @@ def test_load_landmarks_orients_rays_and_guards_the_validation_split(tmp_path):
         assert lm.hypo_dir == pytest.approx((0.0, 1.0)) and lm.cotyl_dir == pytest.approx((1.0, 0.0))
         assert lm.hypo_len == pytest.approx(50.0) and lm.cotyl_len == pytest.approx(25.0)
         assert lm.theta == pytest.approx(90.0)
-    assert not hasattr(landmarks["0-crop-A_f1.png"], "overhook")             # the flag in the CSV is ignored
+    assert landmarks["0-crop-A_f1.png"].overhook is False                   # derived from the clicks (a 90 deg hook), not from the CSV flag
 
 
 def test_split_by_seedling_keeps_all_frames_of_a_seedling_together():
@@ -131,7 +131,7 @@ def test_readout_recovers_theta_and_the_bio_convention():
     hm, vec = _fields(35.0)
     r = readout_from_fields(hm, vec)
     assert r["theta"] == pytest.approx(35.0, abs=1e-3) and r["bio"] == pytest.approx(145.0, abs=1e-3)
-    assert r["junction"] == pytest.approx((20.5, 15.5)) and "overhook" not in r and "overhook_prob" not in r
+    assert r["junction"] == pytest.approx((20.5, 15.5)) and r["overhook"] is False and "overhook_prob" not in r
     assert r["bio"] == pytest.approx(180.0 - r["theta"]) and r["bio"] <= 180.0
     assert bio_from_theta(0.0) == 180.0 and bio_from_theta(90.0) == 90.0
 
@@ -746,3 +746,19 @@ def test_match_seedlings_finds_the_same_plant_by_box(tmp_path):
     out = tmp_path / "g.json"
     assert ms.main(["--new", str(tmp_path / "new.csv"), "--ref", f"old={tmp_path / 'ref.csv'}", "--out", str(out)]) == 0
     assert json.loads(out.read_text(encoding="utf-8")) == {"S:5": "old/S:0"}
+
+
+def test_signed_bio_reading_goes_past_180_only_when_the_rays_cross():
+    hm, vec = _fields(35.0)
+    r = readout_from_fields(hm, vec)
+    assert r["bio_overhook"] == pytest.approx(r["bio"])                       # no base / tip: never flagged
+    from utils.landmark_readout import rays_cross
+    assert rays_cross((-3, 0), (0.2, 0.98), (0, 0), (0.0, 1.0))
+
+
+def test_split_by_seedling_depends_only_on_the_seed_it_is_given():
+    from multi.src.landmarks import split_by_seedling
+    lms = {f"{i}-crop-f{j}.png": _lm(seedling=("S", i)) for i in range(20) for j in range(2)}
+    a = split_by_seedling(lms, 0.15, 7)[1]
+    assert set(a) == set(split_by_seedling(lms, 0.15, 7)[1])            # same split seed: same held-out plants
+    assert set(a) != set(split_by_seedling(lms, 0.15, 8)[1])

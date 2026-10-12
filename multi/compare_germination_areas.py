@@ -28,8 +28,8 @@ draw that conclusion for you.
 THE SEED-POINT PROBLEM
 -----------------------
 GerminationDetector.detect() needs a `seed_point` -- in the GUI this is the
-operator's click (crop_points_distributed[crop_id][0],
-seedling_measurment.py:867). This script has no clicks, so it uses a
+operator's collar point (Gui._seed_point / the last frame's
+seed point in seedling_measurement.py). This script has no clicks, so it uses a
 documented PROXY, identical across all three arms and controlled by
 --seed-point:
   - "bottom-center" (default): (half_w, 2*half_h - 1) of the seedling's own
@@ -49,21 +49,21 @@ via describe()/.diagnostics -- not recomputed here).
 REPRODUCING THE LIVE CONTOUR RECIPE
 ------------------------------------
 `germ_contours_from_mask` below reproduces process_single_frame's germ path
-exactly (seedling_measurment.py):
+exactly (seedling_measurement.py):
   - masks are 255 = foreground in memory already (no bitwise_not needed to
-    get there) -- lines 1026-1033.
-  - cv2.threshold(img_germ, 127, 255, cv2.THRESH_BINARY) -- line 1033.
+    get there) (Gui._clean_ellipse_masks).
+  - cv2.threshold(img_germ, 127, 255, cv2.THRESH_BINARY) (Gui._clean_ellipse_masks).
   - NO zoom_out_mask on germ: that helper is applied to cotyledon/hypocotyl
     only and would displace the germ blob relative to the seed point --
-    lines 1055-1059.
+    (Gui._clean_ellipse_masks).
   - NO bitwise_not on germ: re-inverting made every germ contour describe
-    the crop's background -- lines 1026-1032.
+    the crop's background (Gui._clean_ellipse_masks).
   - cv2.findContours(germ_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0],
     with NO len(c) >= 5 vertex floor -- that floor is only applied to the
     cotyledon/hypocotyl contours (a cv2.fitEllipse prerequisite); germ only
     ever takes contourArea, so a small emerging radicle blob with fewer than
-    5 contour points is kept -- line 1067.
-  - crop_size = (2*half_w + 2*half_h) / 2 -- line 873.
+    5 contour points is kept (Gui._process_ellipse_frame).
+  - crop_size = (2*half_w + 2*half_h) / 2 (Gui._ensure_germination_detected).
 The real utils.germination_detector.GerminationDetector.detect is imported
 and called unmodified; this script never reimplements its logic.
 
@@ -94,7 +94,7 @@ import numpy as np
 
 # multi/ on sys.path (for `from src...`, matching recrop_plates.py's own
 # convention) and the repo root on sys.path (for `models.*` / `utils.*`),
-# without importing seedling_measurment.py itself (Tk + heavy model imports
+# without importing seedling_measurement.py itself (Tk + heavy model imports
 # at class-init time).
 _MULTI_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _MULTI_DIR.parent
@@ -141,7 +141,7 @@ CSV_FIELDNAMES = [
 def germ_contours_from_mask(mask):
     """`mask` is 255 = foreground (or None if that label had no mask for this
     frame). Reproduces process_single_frame's germ contour extraction
-    exactly -- see the module docstring for the seedling_measurment.py line
+    exactly -- see the module docstring for the seedling_measurement.py code
     numbers this mirrors. Deliberately no len(c) >= 5 vertex floor."""
     if mask is None:
         return []
@@ -212,7 +212,7 @@ def run_arm(arm, crop_paths, args):
 
 def build_crop_files(series_dir, series_name, frames, boxes, tmp_dir):
     """Write one preprocessed+cropped PNG per (frame, seedling box), matching
-    seedling_measurment.py's start_analysis crop loop (:667-696): grayscale +
+    seedling_measurement.py's Gui._run_analysis crop loop: grayscale +
     median blur + contrast + normalize preprocessing
     (recrop_plates.read_preprocessed_gray reproduces that exact preprocessing),
     then crop_from_box per seedling box. No super-resolution: the GUI only

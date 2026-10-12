@@ -1,3 +1,4 @@
+from utils.paths import crop_path
 import json
 
 import numpy as np
@@ -96,7 +97,7 @@ def test_runner_reads_crops_through_the_four_class_model(tmp_path):
 
 
 def test_gui_uses_the_learned_onset_and_falls_back_to_the_rule(monkeypatch):
-    import seedling_measurment as sm
+    import seedling_measurement as sm
 
     class Var:
         def get(self):
@@ -107,7 +108,6 @@ def test_gui_uses_the_learned_onset_and_falls_back_to_the_rule(monkeypatch):
     gui.debug_var = Var()
     gui.cropped_filenames_by_crop = {0: ["0-crop-a.png", "0-crop-b.png", "0-crop-c.png"]}
     gui.germ_time_series_by_crop = {0: [[], [], []]}
-    gui.crop_points_distributed = [[(10, 10)]]
     gui.crop_boxes = [{"cx": 50, "cy": 50, "half_w": 20, "half_h": 40}]
 
     class Runner:
@@ -123,8 +123,7 @@ def test_gui_uses_the_learned_onset_and_falls_back_to_the_rule(monkeypatch):
     monkeypatch.setattr(sm, "get_germination_runner", lambda: runner)
     gui._ensure_germination_detected(0)
     assert gui.germination_detector.get_time_zero(0) == 1 and gui.germination_detector.method(0) == "learned"
-    assert [p.replace("\\", "/") for p in runner.paths] == ["data/images/0-crop-a.png", "data/images/0-crop-b.png",
-                                                           "data/images/0-crop-c.png"]
+    assert runner.paths == [crop_path(f) for f in ("0-crop-a.png", "0-crop-b.png", "0-crop-c.png")]
 
     def broken():
         raise RuntimeError("no GPU")

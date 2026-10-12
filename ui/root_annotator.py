@@ -9,8 +9,8 @@ seedling, so you can see the first frame where a radicle shows up (that is the
 germination time).
 
 Run:
-    python -m ui.root_annotator --folder cropped_training_set --angles angle_landmarks_train.csv
-    python -m ui.root_annotator --folder cropped_training_set --angles angle_ground_truth.csv --out root_ground_truth.csv
+    python -m ui.root_annotator --folder data/crops/cropped_training_set --angles data/annotations/angles/angle_landmarks_train.csv
+    python -m ui.root_annotator --folder data/crops/cropped_training_set --angles data/annotations/angles/angle_ground_truth.csv --out root_ground_truth.csv
 
 Per frame:
     radicle visible -> click the COLLAR, then one point on the ROOT axis away from the
@@ -259,10 +259,10 @@ class RootAnnotatorApp(tk.Tk):
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--folder", required=True, help="Folder of the crops (e.g. cropped_training_set)")
+    parser.add_argument("--folder", required=True, help="Folder of the crops (e.g. data/crops/cropped_training_set)")
     parser.add_argument("--angles", required=True,
-                        help="Angle CSV whose measured frames are re-opened (angle_landmarks_train.csv or "
-                             "angle_ground_truth.csv)")
+                        help="Angle CSV whose measured frames are re-opened (data/annotations/angles/angle_landmarks_train.csv or "
+                             "data/annotations/angles/angle_ground_truth.csv)")
     parser.add_argument("--out", default=None, help="Collar/root CSV (default: <angles file stem>_root.csv)")
     return parser
 

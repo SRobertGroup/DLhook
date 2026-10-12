@@ -2,10 +2,10 @@
 """Compare the pipeline's hook angles with hand-measured ground truth.
 
 Ground truth comes from the annotation tool (`python -m ui.angle_annotator`,
-angle_ground_truth.csv). For every seedling that has at least one measured
+data/annotations/angles/angle_ground_truth.csv). For every seedling that has at least one measured
 frame, this runs the REAL pipeline -- the configured segmentation backend, then
 Gui.process_single_frame and Gui._reconstruct_series_for_crop, with no Tk window
--- over that seedling's whole crop series (all its crops in cropped_training_set/
+-- over that seedling's whole crop series (all its crops in data/crops/cropped_training_set/
 manifest.csv, in manifest = time order), and compares the result on the
 annotated frames.
 
@@ -41,7 +41,7 @@ held-out ground truth only -- never on frames you annotated for training.
 
 Usage:
     python -m multi.validate_angles
-    python -m multi.validate_angles --backends binary,multiclass --truth angle_ground_truth.csv
+    python -m multi.validate_angles --backends binary,multiclass --truth data/annotations/angles/angle_ground_truth.csv
     python -m multi.validate_angles --backends multiclass --landmark-checkpoint multi/results/models_landmarks/best.pt
 """
 from __future__ import annotations
@@ -314,8 +314,8 @@ def write_series_csv(path, series, truth, full_preds):
 
 def build_arg_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--truth", default=str(_REPO_ROOT / "angle_ground_truth.csv"))
-    p.add_argument("--crops", default=str(_REPO_ROOT / "cropped_training_set"),
+    p.add_argument("--truth", default=str(_REPO_ROOT / "data/annotations/angles/angle_ground_truth.csv"))
+    p.add_argument("--crops", default=str(_REPO_ROOT / "data/crops/cropped_training_set"),
                    help="Folder of crops with its manifest.csv")
     p.add_argument("--backends", default="binary,multiclass", help="Comma-separated: binary, multiclass")
     p.add_argument("--landmark-checkpoint", default=None,

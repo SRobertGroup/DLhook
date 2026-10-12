@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 """How repeatable are the hand-measured hook angles? Compares a blind re-measurement with the originals.
 
-    python -m ui.angle_annotator --folder cropped_training_set --out angle_repeat.csv \
-        --repeat-of angle_landmarks_train.csv,angle_ground_truth.csv --repeat-n 200
-    python -m multi.analyze_repeatability [--original a.csv,b.csv] [--repeat angle_repeat.csv]
+    python -m ui.angle_annotator --folder data/crops/cropped_training_set --out data/annotations/angles/angle_repeat.csv \
+        --repeat-of data/annotations/angles/angle_landmarks_train.csv,data/annotations/angles/angle_ground_truth.csv --repeat-n 200
+    python -m multi.analyze_repeatability [--original a.csv,b.csv] [--repeat data/annotations/angles/angle_repeat.csv]
 
 Several rounds (each paired against its own originals -- crop names repeat across crop folders, so
 rounds from different folders must not be pooled before pairing):
 
     python -m multi.analyze_repeatability \
-        --round "round 1 (training crops)=angle_landmarks_train.csv,angle_ground_truth.csv:angle_repeat.csv" \
-        --round "round 2 (new seedlings)=angle_new.csv:angle_repeat_new.csv" --out-dir multi/results/repeatability_all
+        --round "round 1 (training crops)=data/annotations/angles/angle_landmarks_train.csv,data/annotations/angles/angle_ground_truth.csv:data/annotations/angles/angle_repeat.csv" \
+        --round "round 2 (new seedlings)=data/annotations/angles/angle_new.csv:data/annotations/angles/angle_repeat_new.csv" --out-dir multi/results/repeatability_all
 
 Frames are paired by (series, crop_id, frame). For the pairs measured both times it reports, in the
 app's bio convention (180 = closed, decreasing as the hook opens):
@@ -42,7 +42,7 @@ import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = _REPO_ROOT / "multi" / "results" / "repeatability"
-DEFAULT_ORIGINALS = ("angle_landmarks_train.csv", "angle_ground_truth.csv")
+DEFAULT_ORIGINALS = ("data/annotations/angles/angle_landmarks_train.csv", "data/annotations/angles/angle_ground_truth.csv")
 BINS = ((0, 60), (60, 120), (120, 160), (160, 181), (181, 400))
 
 
@@ -218,7 +218,7 @@ def parse_round(text):
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--original", default=",".join(str(_REPO_ROOT / n) for n in DEFAULT_ORIGINALS))
-    p.add_argument("--repeat", default=str(_REPO_ROOT / "angle_repeat.csv"))
+    p.add_argument("--repeat", default=str(_REPO_ROOT / "data/annotations/angles/angle_repeat.csv"))
     p.add_argument("--round", action="append", default=None, metavar="LABEL=ORIG[,ORIG]:REPEAT",
                    help="one repeat round, paired against its own originals (repeatable; replaces "
                         "--original/--repeat)")

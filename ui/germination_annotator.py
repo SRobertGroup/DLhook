@@ -7,9 +7,9 @@ frames and mark the first one in which a radicle is visible; that single decisio
 every frame of the seedling (before = no radicle, from the onset on = radicle).
 
 Run:
-    python -m ui.germination_annotator --folder cropped_training_set --subset train --out germination_train.csv
+    python -m ui.germination_annotator --folder data/crops/cropped_training_set --subset train --out data/annotations/germination/germination_train.csv
     python -m ui.germination_annotator --folder cropped_training_set --subset test  --out germination_test.csv
-    python -m ui.germination_annotator --folder cropped_training_set --subset train --out germination_train.csv --export-frame-labels frames.csv
+    python -m ui.germination_annotator --folder data/crops/cropped_training_set --subset train --out data/annotations/germination/germination_train.csv --export-frame-labels frames.csv
 
 --subset holds out whole SEEDLINGS (about 20%, deterministic) so the test set never shares a seedling
 with training. Do not use the image-level multiclass split here: it leaves a seedling with a few
@@ -270,7 +270,7 @@ class GerminationAnnotatorApp(tk.Tk):
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--folder", required=True, help="Folder of the crops (e.g. cropped_training_set)")
+    parser.add_argument("--folder", required=True, help="Folder of the crops (e.g. data/crops/cropped_training_set)")
     parser.add_argument("--manifest", default=None, help="recrop_plates manifest.csv (default: <folder>/manifest.csv)")
     parser.add_argument("--subset", choices=("train", "test"), default=None,
                         help="Seedling-level hold-out: 'test' is a fixed ~20%% of the seedlings, 'train' the rest")

@@ -2,11 +2,11 @@
 """Review earlier angle annotations: fix mistakes, mark frames where no angle can be measured.
 
     # the measured frames the model disagrees with most come first (errors from validate_landmarks)
-    python -m ui.angle_reviewer --folder cropped_training_set --csv angle_landmarks_train.csv --errors errors.csv
+    python -m ui.angle_reviewer --folder data/crops/cropped_training_set --csv data/annotations/angles/angle_landmarks_train.csv --errors errors.csv
 
     # frames you skipped after the seedling germinated: mark the ones where the cotyledons rotate
-    python -m ui.angle_reviewer --folder cropped_training_set --csv angle_landmarks_train.csv \
-        --skipped --germination germination_train.csv
+    python -m ui.angle_reviewer --folder data/crops/cropped_training_set --csv data/annotations/angles/angle_landmarks_train.csv \
+        --skipped --germination data/annotations/germination/germination_train.csv
 
 Every frame opens with the five clicks you made (a skipped frame opens empty). The cotyledon axis is
 read as base -> tip: its first click is the BASE (at the junction) and its last click the TIP (the

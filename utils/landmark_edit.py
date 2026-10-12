@@ -186,6 +186,7 @@ def _shapes_from_readout(readout, arrow_min):
 
 
 MUTED_COLOR = "#9a9a9a"      # a readout the readability gate rejected
+FLAG_COLOR = "#ffb000"       # a readout the time-series checks flagged (utils/landmark_temporal.py)
 
 
 def landmark_shapes(points=None, readout=None, *, arrow_min=40, color=None):

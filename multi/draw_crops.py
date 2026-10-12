@@ -15,11 +15,11 @@ seedling. The same fixed set of boxes is then reused for every frame of that
 series by recrop_plates.py, exactly like the GUI's own crop-box workflow.
 
 Run:
-    python -m multi.draw_crops --example-data example_data --out crop_boxes.json
+    python -m multi.draw_crops --example-data example_data --out data/crop_boxes/crop_boxes.json
 
 Drawing a validation set next to existing ones (read-only reference boxes):
-    python -m multi.draw_crops --out crop_boxes_validation.json --existing training=cropped_training_set
-        --existing new=cropped_new_set --existing open=cropped_open_set
+    python -m multi.draw_crops --out data/crop_boxes/crop_boxes_validation.json --existing training=data/crops/cropped_training_set
+        --existing new=data/crops/cropped_new_set --existing open=data/crops/cropped_open_set
 `--existing [LABEL=]PATH` is repeatable; PATH is a crop folder (its manifest.csv, which records what
 was actually cut), a manifest.csv, or a boxes .json. Each reference set is drawn per series in its own
 colour as thin dashed boxes tagged LABEL#seedling-number, on top of the plate; they cannot be
@@ -27,7 +27,7 @@ selected, moved or drawn through by accident. A box of yours that touches a refe
 magenta and the status line names the worst overlap, so a validation set can be kept free of plants
 that were trained on. Press E to hide / show the references.
 
-Output (crop_boxes.json), consumed unmodified by
+Output (data/crop_boxes/crop_boxes.json), consumed unmodified by
 multi.recrop_plates.load_boxes_file:
     {"F1_Plate_2_YS": [{"cx": 428, "cy": 2783, "half_w": 120, "half_h": 90}, ...]}
 
@@ -163,7 +163,7 @@ class BoxStore:
     """Holds {series_name: [{"cx","cy","half_w","half_h"}, ...]} and persists
     it to `path` as JSON on every mutation (atomic: write to a temp file in
     the same directory, then os.replace -- so a crash mid-write never leaves
-    a corrupt/partial crop_boxes.json). Loads any existing file at
+    a corrupt/partial data/crop_boxes/crop_boxes.json). Loads any existing file at
     construction time so the tool is resumable across runs."""
 
     def __init__(self, path: str):
@@ -377,7 +377,7 @@ def build_arg_parser():
     parser.add_argument("--example-data", default=None,
                          help="Directory of series subfolders (default: <repo>/example_data)")
     parser.add_argument("--out", default=None,
-                         help="crop_boxes.json path -- loaded on startup if it exists (resumable), "
+                         help="data/crop_boxes/crop_boxes.json path -- loaded on startup if it exists (resumable), "
                               "saved atomically on every box edit (default: <repo>/crop_boxes.json)")
     parser.add_argument("--existing", action="append", default=[], metavar="[LABEL=]PATH",
                          help="Show an earlier set of boxes read-only (repeatable): a crop folder, its "
@@ -389,7 +389,7 @@ def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
     example_data_dir = args.example_data or os.path.join(_REPO_ROOT, "example_data")
-    out_path = args.out or os.path.join(_REPO_ROOT, "crop_boxes.json")
+    out_path = args.out or os.path.join(_REPO_ROOT, "data/crop_boxes/crop_boxes.json")
 
     series_list = discover_series_last_frames(example_data_dir)
     if not series_list:

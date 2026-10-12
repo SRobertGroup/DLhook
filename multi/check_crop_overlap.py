@@ -7,7 +7,7 @@ is not overlapping). Boxes of two files overlapping means the same seedling is
 (partly) in both crop sets -- a leak if one set is for training and the other
 for testing, or a duplicate seedling.
 
-    python -m multi.check_crop_overlap [--old crop_boxes.json] [--new crop_boxes_new.json]
+    python -m multi.check_crop_overlap [--old data/crop_boxes/crop_boxes.json] [--new data/crop_boxes/crop_boxes_new.json]
 
 Prints each overlapping pair with the shared area as a fraction of the smaller
 box (IoU-free: 1.0 = one box lies fully inside the other). Exit status 1 when
@@ -107,8 +107,8 @@ def build_filtered(classified, decisions):
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--old", default=str(_REPO_ROOT / "crop_boxes.json"))
-    p.add_argument("--new", default=str(_REPO_ROOT / "crop_boxes_new.json"))
+    p.add_argument("--old", default=str(_REPO_ROOT / "data/crop_boxes/crop_boxes.json"))
+    p.add_argument("--new", default=str(_REPO_ROOT / "data/crop_boxes/crop_boxes_new.json"))
     args = p.parse_args(argv)
     old = json.loads(Path(args.old).read_text(encoding="utf-8"))
     new = json.loads(Path(args.new).read_text(encoding="utf-8"))

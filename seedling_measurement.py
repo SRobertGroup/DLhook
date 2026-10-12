@@ -21,6 +21,7 @@ from utils.angle_timeseries import (reconstruct_series, sync_angle_and_state_lis
                                     UNREADABLE_STATE)
 from utils.landmark_gate import gate_enabled
 from utils.landmark_timeseries import reconstruct_landmark_series
+from utils.landmark_temporal import temporal_flags
 from utils.hypocotyl_traits import hypocotyl_traits
 from utils.clean_on_exit import RemoveData
 from utils.preprocess_model_input import compute_time_deltas, metadata_has_gaps, order_series, preprocess_images
@@ -901,6 +902,7 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
         bio = reconstruct_landmark_series(readouts)
         bio = [manual_bio[i] if is_manual[i] else v for i, v in enumerate(bio)]
         states = classify_states(bio, is_manual)
+        self._flag_landmark_series(frame_results, seed_id, is_manual, gated)
 
         for result, angle, state, manual, gate in zip(frame_results, bio, states, is_manual, gated):
             if result is None or manual:
@@ -908,6 +910,23 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
             result["angle_dict"][seed_id] = np.nan if (angle is None or np.isnan(angle)) else float(angle)
             result.setdefault("state_dict", {})[seed_id] = UNREADABLE_STATE if gate else state
             sync_angle_and_state_lists(result)
+
+    @staticmethod
+    def _flag_landmark_series(frame_results, seed_id, is_manual, gated):
+        """Temporal consistency flags (utils/landmark_temporal.py) written onto each frame's landmark
+        readout: "temporal_flag", "temporal_collar_dev", "collar_ref". Flag only -- angles and states
+        are untouched. Derived afresh on every reconstruction, so a manual edit clears stale flags."""
+        points, readouts = [], []
+        for result, manual, gate in zip(frame_results, is_manual, gated):
+            readout = (result.get("landmarks") or {}).get(seed_id) if result else None
+            readouts.append(readout)
+            usable = readout and not gate and (manual or result.get("angle_source") == "landmarks")
+            points.append({"junction": readout.get("junction"), "collar": readout.get("collar")} if usable else None)
+        for readout, info in zip(readouts, temporal_flags(points, is_manual)):
+            if readout:
+                readout["temporal_flag"] = info["flag"]
+                readout["temporal_collar_dev"] = info["collar_dev"]
+                readout["collar_ref"] = info["collar_ref"]
 
     def process_single_frame(self, file_name, crop_id, frame_index=None):
         """

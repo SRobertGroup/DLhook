@@ -57,10 +57,10 @@ unless --force. Crops are decoded in IMAGE_CHUNK-sized chunks
 _segment_many() still batches tiles across a whole chunk internally.
 
 Usage:
-    python multi/segment_crops.py --crops cropped_training_set --out cropped_training_set_seg
-    python multi/segment_crops.py --crops cropped_training_set --out cropped_training_set_seg --cpu
-    python multi/segment_crops.py --crops cropped_training_set --out cropped_training_set_seg --force
-    python multi/segment_crops.py --crops cropped_training_set --out cropped_training_set_seg --classes radicle --force
+    python multi/segment_crops.py --crops data/crops/cropped_training_set --out data/crops/cropped_training_set_seg
+    python multi/segment_crops.py --crops data/crops/cropped_training_set --out data/crops/cropped_training_set_seg --cpu
+    python multi/segment_crops.py --crops data/crops/cropped_training_set --out data/crops/cropped_training_set_seg --force
+    python multi/segment_crops.py --crops data/crops/cropped_training_set --out data/crops/cropped_training_set_seg --classes radicle --force
 """
 from __future__ import annotations
 

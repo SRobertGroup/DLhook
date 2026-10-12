@@ -32,7 +32,7 @@ class PatchDataset(Dataset):
                  augmentation_cfg: dict | None = None, seed: int | None = None,
                  raw_ext: str = ".png", binarize_mask: bool = False,
                  landmarks: dict | None = None, filenames=None, landmark_cfg: dict | None = None,
-                 extra_rows=None):
+                 extra_rows=None, measurable_negatives=None):
         """`landmarks` ({crop file name: multi.src.landmarks.Landmark}) switches
         on landmark supervision: __getitem__ then returns a third element, a
         dict of target tensors (hm, paf, paf_valid, has_kp, ...), rendered
@@ -73,6 +73,10 @@ class PatchDataset(Dataset):
             self.rows = [r for r in self.rows if r["filename"] in keep]
 
         self.landmarks = landmarks
+        # Crops an annotator skipped (multi.src.landmarks.load_measurable_negatives): with this set
+        # given, every tile carries a "measurable" target -- 0 on a skipped crop, 1 on a measured
+        # crop's tile that holds the junction, ignored (has_measurable = 0) anywhere else.
+        self.measurable_negatives = None if measurable_negatives is None else set(measurable_negatives)
         lcfg = dict(landmark_cfg or {})
         self.hm_sigma = float(lcfg.get("sigma", HM_SIGMA))
         self.ray_width = float(lcfg.get("ray_width", RAY_WIDTH))
@@ -278,4 +282,8 @@ class PatchDataset(Dataset):
             "has_tip": torch.tensor(float(kp["tip_hm"].max() > PEAK_PRESENT and kp["base_hm"].max() > PEAK_PRESENT),
                                     dtype=torch.float32),
         }
+        if self.measurable_negatives is not None:
+            negative = row["filename"] in self.measurable_negatives
+            targets["measurable"] = torch.tensor(0.0 if negative else 1.0, dtype=torch.float32)
+            targets["has_measurable"] = torch.tensor(1.0 if negative else has_kp, dtype=torch.float32)
         return torch.from_numpy(image_chw), torch.from_numpy(label_hw), targets

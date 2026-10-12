@@ -14,9 +14,9 @@ paths:
   # (or merge_masks.py --from-probs) produces from those probability maps.
   # None of the three are the 441 human-annotated validation crops -- those
   # live under `evaluation:` below and are never part of the training run.
-  raw_data_dir: cropped_training_set
-  probability_maps_dir: cropped_training_set_seg
-  multiclass_masks_dir: cropped_training_set_labels
+  raw_data_dir: data/crops/cropped_training_set
+  probability_maps_dir: data/crops/cropped_training_set_seg
+  multiclass_masks_dir: data/crops/cropped_training_set_labels
   weights_cotyledon: weights/RootPainter_weights/cotyledon_v5.pkl
   weights_hypocotyl: weights/RootPainter_weights/hypocot_v5.pkl
   weights_radicle: weights/RootPainter_weights/germ_v2.pkl
@@ -41,7 +41,7 @@ evaluation:
 
 data:
   # Sized to the DATA, not to the inference tile. The hand-drawn crops are
-  # narrow strips: median 74 x 246 px, max width 232 (cropped_training_set/
+  # narrow strips: median 74 x 246 px, max width 232 (data/crops/cropped_training_set/
   # manifest.csv). At the old patch_size 572 every one of the 2384 crops was
   # narrower than the patch, so the median patch was 94.5% reflect-padding and
   # only 5.5% real content. 252 is the smallest valid UNetGNRes size

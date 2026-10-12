@@ -16,7 +16,7 @@ the same proxy as multi/compare_germination_areas.py (bottom-centre of the crop)
 for every arm. Only seedlings annotated 'found' are scored; 'before_start' / 'none'
 seedlings are reported separately as detected / not detected.
 
-    python -m multi.validate_germination [--truth germination_train.csv] [--arms germ_v1,germ_v2,multiclass]
+    python -m multi.validate_germination [--truth data/annotations/germination/germination_train.csv] [--arms germ_v1,germ_v2,multiclass]
 
 Outputs multi/results/germination_validation/{germination_validation.csv,summary.txt}.
 """
@@ -115,8 +115,8 @@ def format_summary(scores):
 
 def build_arg_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--truth", default=str(_REPO_ROOT / "germination_train.csv"))
-    p.add_argument("--folder", default=str(_REPO_ROOT / "cropped_training_set"))
+    p.add_argument("--truth", default=str(_REPO_ROOT / "data/annotations/germination/germination_train.csv"))
+    p.add_argument("--folder", default=str(_REPO_ROOT / "data/crops/cropped_training_set"))
     p.add_argument("--arms", default=",".join(ARMS))
     p.add_argument("--germ-v1", default="weights/RootPainter_weights/germ_v1.pkl")
     p.add_argument("--germ-v2", default="weights/RootPainter_weights/germ_v2.pkl")

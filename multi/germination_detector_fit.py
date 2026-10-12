@@ -11,7 +11,7 @@ single noisy frame cannot flip the answer.
 Scored by cross-validation over whole seedlings, against the app's current rule
 (utils/germination_detector.py thresholding the radicle area) on the same frames:
 
-    python -m multi.germination_detector_fit [--truth germination_train.csv] [--folds 5]
+    python -m multi.germination_detector_fit [--truth data/annotations/germination/germination_train.csv] [--folds 5]
 
 The fitted weights go to weights/germination_detector.json (use --no-save to skip).
 Nothing in the GUI uses it yet. Features are cached in
@@ -117,8 +117,8 @@ def summarise(errors, missed, n):
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--truth", default=str(_REPO_ROOT / "germination_train.csv"))
-    p.add_argument("--folder", default=str(_REPO_ROOT / "cropped_training_set"))
+    p.add_argument("--truth", default=str(_REPO_ROOT / "data/annotations/germination/germination_train.csv"))
+    p.add_argument("--folder", default=str(_REPO_ROOT / "data/crops/cropped_training_set"))
     p.add_argument("--checkpoint", default="weights/multiclass/dlhook_4class_v1.pt")
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--l2", type=float, default=1.0)

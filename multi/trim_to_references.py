@@ -6,10 +6,10 @@ is pulled back to the reference box's edge -- the side (left, right, top, bottom
 least area. A box that would lose more than --max-trim of its area, or shrink below the minimum
 size (--min-half, default a 50 px wide box), is left unchanged and listed as needing a decision by hand (move it, or drop it).
 
-    python -m multi.trim_to_references --boxes crop_boxes_validation.json \
-        --out crop_boxes_validation_trimmed.json \
-        --existing training=cropped_training_set --existing new=cropped_new_set \
-        --existing open=cropped_open_set [--example-data example_data --preview-dir trim_preview]
+    python -m multi.trim_to_references --boxes data/crop_boxes/crop_boxes_validation.json \
+        --out data/crop_boxes/crop_boxes_validation_trimmed.json \
+        --existing training=data/crops/cropped_training_set --existing new=data/crops/cropped_new_set \
+        --existing open=data/crops/cropped_open_set [--example-data example_data --preview-dir trim_preview]
 
 `--existing` is the same `[LABEL=]PATH` as multi.draw_crops (crop folder, manifest.csv or boxes
 .json). Without clicks there is no knowing where the seedling is inside its own box, so check the

@@ -7,8 +7,8 @@ contain a plant that was trained on. This matches seedlings by their crop boxes,
 crop manifests (what was actually cut, not what a boxes file says), as the shared area over the
 smaller box in the same series.
 
-    python -m multi.match_seedlings --new cropped_open_set/manifest.csv \
-        --ref cropped_training_set/manifest.csv --ref new=cropped_new_set/manifest.csv \
+    python -m multi.match_seedlings --new data/crops/cropped_open_set/manifest.csv \
+        --ref data/crops/cropped_training_set/manifest.csv --ref new=data/crops/cropped_new_set/manifest.csv \
         --out open_seedling_groups.json
 
 `--ref [TAG=]MANIFEST` is repeatable; TAG is the `tag:` the reference gets under

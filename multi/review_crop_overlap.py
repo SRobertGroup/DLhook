@@ -22,8 +22,8 @@ list as "drawn", and is saved in <out>.added.json. Delete removes the selected d
 click (no drag) selects the box under the cursor.
 
 Run:
-    python -m multi.review_crop_overlap --old crop_boxes.json --new crop_boxes_new.json
-    python -m multi.review_crop_overlap --out crop_boxes_new_filtered.json --example-data example_data
+    python -m multi.review_crop_overlap --old data/crop_boxes/crop_boxes.json --new data/crop_boxes/crop_boxes_new.json
+    python -m multi.review_crop_overlap --out data/crop_boxes/crop_boxes_new_filtered.json --example-data example_data
 
 Keys:  K keep   D drop   U undecided (partial boxes)   Delete remove the selected drawn box
 Up/Down or N/P next/previous box in the list   Left/Right previous/next series
@@ -483,9 +483,9 @@ class ReviewApp(tk.Tk):
 
 def build_arg_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--old", default=str(_REPO_ROOT / "crop_boxes.json"))
-    p.add_argument("--new", default=str(_REPO_ROOT / "crop_boxes_new.json"))
-    p.add_argument("--out", default=str(_REPO_ROOT / "crop_boxes_new_filtered.json"),
+    p.add_argument("--old", default=str(_REPO_ROOT / "data/crop_boxes/crop_boxes.json"))
+    p.add_argument("--new", default=str(_REPO_ROOT / "data/crop_boxes/crop_boxes_new.json"))
+    p.add_argument("--out", default=str(_REPO_ROOT / "data/crop_boxes/crop_boxes_new_filtered.json"),
                    help="filtered boxes file, rewritten after every decision")
     p.add_argument("--example-data", default=str(_REPO_ROOT / "example_data"))
     p.add_argument("--partial-below", type=float, default=0.5,

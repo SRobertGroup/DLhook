@@ -29,7 +29,7 @@ defaults) unchanged, but:
 Note on RGB vs BGR: `multi/src/data_loader.py` (training) reads training
 crops via PIL (`.convert("RGB")`) while this module (like UNetInference)
 reads crops via cv2 (BGR). This is *not* a bug worth fixing: every crop in
-`cropped_training_set/` is greyscale (PIL mode "L" upstream, R==B in every
+`data/crops/cropped_training_set/` is greyscale (PIL mode "L" upstream, R==B in every
 pixel once expanded to 3 channels), so channel order carries no information
 here and swapping it would be a no-op change dressed up as a fix. Left
 alone deliberately.
@@ -63,6 +63,7 @@ from models.normalization import zscore_normalize
 from models.unet import (
     UNetGNRes, align_output_to_target, has_landmark_head, head_from_state_dict,
     landmark_cotyl_from_state_dict, landmark_hidden_from_state_dict, landmark_root_from_state_dict,
+    measurable_from_state_dict,
     strip_deprecated_landmark_keys,
 )
 from utils.device import pick_device
@@ -129,7 +130,8 @@ class MulticlassInference:
         self.model = UNetGNRes(n_classes=num_classes, head=self.head, landmark_head=self.has_landmarks,
                                landmark_hidden=landmark_hidden_from_state_dict(state_dict),
                                landmark_root=landmark_root_from_state_dict(state_dict),
-                               landmark_cotyl=landmark_cotyl_from_state_dict(state_dict))
+                               landmark_cotyl=landmark_cotyl_from_state_dict(state_dict),
+                               measurable_head=measurable_from_state_dict(state_dict))
         try:
             self.model.load_state_dict(state_dict)
         except RuntimeError:
@@ -309,8 +311,9 @@ class MulticlassInference:
         batch = np.stack([zscore_normalize(t) for t in tiles]).transpose(0, 3, 1, 2)
         tensor = torch.from_numpy(batch).to(self.device)
         with torch.inference_mode():
-            _, kp = self._core().forward_with_landmarks(tensor)
+            _, kp, measurable = self._core().forward_with_landmarks(tensor, return_measurable=True)
             kp = align_output_to_target(kp, self._out_shape_ref).float()
+            measurable = None if measurable is None else torch.sigmoid(measurable.float()).cpu().numpy()
             hm = torch.sigmoid(kp[:, 0]).cpu().numpy()
             vec = kp[:, 1:5].cpu().numpy()
             extra = None
@@ -323,6 +326,10 @@ class MulticlassInference:
                     tip = torch.sigmoid(kp[:, 9]).cpu().numpy()
                     for i, e in enumerate(extra):
                         e["base_hm"], e["tip_hm"] = base[i], tip[i]
+            if measurable is not None:            # the image-level "measurable" probability of the tile
+                extra = extra or [{} for _ in range(hm.shape[0])]
+                for i, e in enumerate(extra):
+                    e["measurable"] = float(measurable[i])
         return [(hm[i], vec[i], extra[i] if extra else None) for i in range(hm.shape[0])]
 
     # Average every landmark map over the crop and its mirror image (x components of the
@@ -357,7 +364,7 @@ class MulticlassInference:
             vf = vf[:, :, ::-1].copy()
             vf[[0, 2]] *= -1.0                              # x components flip sign with the image
             merged = None
-            if extra is not None and ef is not None:
+            if extra is not None and ef is not None and "collar_hm" in extra and "collar_hm" in ef:
                 rf = ef["root_vec"][:, :, ::-1].copy()
                 rf[0] *= -1.0
                 merged = {"collar_hm": (extra["collar_hm"] + ef["collar_hm"][:, ::-1]) / 2,
@@ -365,6 +372,9 @@ class MulticlassInference:
                 for key in ("base_hm", "tip_hm"):
                     if key in extra and key in ef:
                         merged[key] = (extra[key] + ef[key][:, ::-1]) / 2
+            if extra is not None and ef is not None and "measurable" in extra and "measurable" in ef:
+                merged = merged or {}
+                merged["measurable"] = (extra["measurable"] + ef["measurable"]) / 2
             out.append(((hm + hf[:, ::-1]) / 2, (vec + vf) / 2, merged))
         return out
 
@@ -381,6 +391,7 @@ class MulticlassInference:
 
         plans, hm_out, vec_out = [], [], []
         collar_out, root_out, base_out, tip_out = [], [], [], []
+        best_tile = {}       # crop index -> (junction peak, measurable p) of its strongest tile
         work = []
         for idx, image in enumerate(images):
             orig_h, orig_w = image.shape[:2]
@@ -400,7 +411,11 @@ class MulticlassInference:
             for (idx, x, y, _), (hm, vec, extra) in zip(chunk, self._run_batch_landmarks([c[3] for c in chunk])):
                 hm_out[idx][y:y + self.out_size, x:x + self.out_size] = hm
                 vec_out[idx][:, y:y + self.out_size, x:x + self.out_size] = vec
-                if extra is not None:
+                if extra is not None and "measurable" in extra:
+                    peak = float(hm.max())
+                    if idx not in best_tile or peak > best_tile[idx][0]:
+                        best_tile[idx] = (peak, extra["measurable"])
+                if extra is not None and "collar_hm" in extra:
                     collar_out[idx][y:y + self.out_size, x:x + self.out_size] = extra["collar_hm"]
                     root_out[idx][:, y:y + self.out_size, x:x + self.out_size] = extra["root_vec"]
                     if "tip_hm" in extra:
@@ -419,6 +434,11 @@ class MulticlassInference:
                 if self._core().landmark_cotyl:
                     extra["base_hm"] = _crop_from_pad(base_out[idx], base_pad)
                     extra["tip_hm"] = _crop_from_pad(tip_out[idx], base_pad)
+            if idx in best_tile:
+                # A tall crop is several tiles: the one holding the hook (strongest junction peak)
+                # says whether the hook is measurable; a tile of bare hypocotyl does not.
+                extra = extra or {}
+                extra["measurable"] = best_tile[idx][1]
             results.append((hm, vec, extra))
         return results
 
@@ -461,10 +481,10 @@ def merge_landmark_fields(members):
     merged = None
     if extras:
         merged = {}
-        for key in ("collar_hm", "root_vec", "base_hm", "tip_hm"):
+        for key in ("collar_hm", "root_vec", "base_hm", "tip_hm", "measurable"):
             have = [e[key] for e in extras if key in e]
             if have:
-                merged[key] = np.mean(have, axis=0)
+                merged[key] = float(np.mean(have)) if key == "measurable" else np.mean(have, axis=0)
     return hm, vec, merged
 
 

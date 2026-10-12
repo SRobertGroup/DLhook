@@ -11,7 +11,8 @@ from utils.gui_thread_safety import ProgressReporter
 from utils.angle_timeseries import sync_angle_and_state_lists
 from utils.germination_detector import GerminationDetector
 from utils.hypocotyl_traits import hypocotyl_midline, hypocotyl_traits, to_mm
-from utils.landmark_edit import LandmarkClickSession, MUTED_COLOR, landmark_shapes
+from utils.landmark_edit import FLAG_COLOR, LandmarkClickSession, MUTED_COLOR, landmark_shapes
+from utils.landmark_temporal import describe_flag
 from utils.landmark_edits import edit_record, series_name_from_path, write_edit
 from utils.angle_annotation import parse_crop_filename
 from utils.paths import crop_path
@@ -607,8 +608,14 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         if self._manual_mode and self._session.points:
             shapes += landmark_shapes(points=self._session.named_points())
         elif self.show_landmarks.get() and not self._manual_mode:
-            gated = bool(readout and readout.get("gated") and result.get("state_dict", {}).get(seed_id) != "Manual")
-            shapes += landmark_shapes(readout=readout, color=MUTED_COLOR if gated else None)
+            manual = result.get("state_dict", {}).get(seed_id) == "Manual"
+            gated = bool(readout and readout.get("gated") and not manual)
+            flagged = bool(readout and readout.get("temporal_flag") and not manual and not gated)
+            shapes += landmark_shapes(readout=readout,
+                                      color=MUTED_COLOR if gated else FLAG_COLOR if flagged else None)
+            collar_ref = readout.get("collar_ref") if readout else None
+            if flagged and collar_ref is not None:     # where the seedling's collar usually is
+                shapes.append({"kind": "point", "xy": tuple(collar_ref), "color": FLAG_COLOR, "hollow": True})
         self.canvas.set_image(image, overlay=shapes)
 
         self.angle_label.configure(text=self._angle_text(result, seed_id, readout))
@@ -656,6 +663,9 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             theta_text = "-" if gt is None else f"{gt:.0f}°"
             text += (f"\nno reading (unreadable p={p_text}; model θ={theta_text})"
                      " -- Apply landmarks to set one")
+        elif readout and readout.get("temporal_flag") and source != "manual":
+            text += ("\n⚠ " + describe_flag(readout["temporal_flag"], readout.get("temporal_collar_dev"))
+                     + " -- check this frame (Apply landmarks or Del to correct)")
 
         traits = (result.get("traits") or {}).get(seed_id)
         if traits and isinstance(traits.get("length_px"), (int, float)) and not np.isnan(traits["length_px"]):

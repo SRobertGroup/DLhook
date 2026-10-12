@@ -354,7 +354,7 @@ def run_real(series_plans, output_dir: Path, manifest_path: Path, overwrite: boo
 
     # This run only rewrites rows for the series in `series_plans` -- if the
     # manifest file already exists (e.g. it's shared with other, previously-
-    # cropped series, as cropped_training_set/manifest.csv is), preserve every
+    # cropped series, as data/crops/cropped_training_set/manifest.csv is), preserve every
     # other series' rows rather than clobbering them. Rows belonging to a
     # series THIS run touches are dropped and replaced by manifest_rows above
     # (this is also what makes an --overwrite rerun of an existing series

@@ -19,6 +19,12 @@ BerryBox v2 set: it rejects 68% of skipped frames there while keeping 99% of mea
 fitted by a scratch analysis on multi/results/gate_features.csv (fit stored in
 multi/results/landmark_gate_fit.json; not read at runtime).
 
+Learned "measurable" head (preferred). When the landmark models carry the image-level
+"measurable" output (models/unet.py: cls_measurable, trained on the annotators' skip labels), the
+readout has "measurable_p" and the gate uses it instead of the logistic above:
+unreadable_p = 1 - measurable_p, unreadable if unreadable_p >= MEASURABLE_THRESHOLD. The logistic
+stays the fallback for models without the head.
+
 DLHOOK_LANDMARK_GATE=0 disables the gate (see gate_enabled).
 """
 from __future__ import annotations
@@ -33,6 +39,10 @@ GATE_THRESHOLD = 0.6546185430239393
 TIP_FILL = 0.4419798254966736          # tip_peak when no member has a tip head
 MEMBER_SD_FILL = 90.0                  # member_theta_sd when any member readout failed
 ENV_VAR = "DLHOOK_LANDMARK_GATE"
+# Gate on the learned head: unreadable when 1 - measurable_p reaches this. Set from the threshold that
+# keeps 98% of the measured frames of the training runs' held-out seedlings
+# (multi/results/measurable_fit.json, written by multi/validate_measurable.py --fit).
+MEASURABLE_THRESHOLD = 0.5
 
 
 def unreadable_probability(peak, tip_peak, member_theta_sd):
@@ -73,12 +83,20 @@ def annotate_readout(readout, tip_hm=None, member_thetas=None):
         sd = MEMBER_SD_FILL
     else:
         sd = _pstd([float(t) for t in member_thetas])
-    p = unreadable_probability(readout.get("peak", 0.0), tip_peak, sd)
     readout["tip_peak"] = tip_peak
     readout["member_theta_sd"] = sd
     readout["member_thetas"] = None if member_thetas is None else list(member_thetas)
+    measurable = readout.get("measurable_p")
+    if measurable is not None:          # the learned head decides when the models have it
+        p = 1.0 - float(measurable)
+        readout["unreadable_p"] = p
+        readout["unreadable"] = bool(p >= MEASURABLE_THRESHOLD)
+        readout["gate_source"] = "measurable"
+        return readout
+    p = unreadable_probability(readout.get("peak", 0.0), tip_peak, sd)
     readout["unreadable_p"] = p
     readout["unreadable"] = bool(p >= GATE_THRESHOLD)
+    readout["gate_source"] = "logistic"
     return readout
 
 

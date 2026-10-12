@@ -18,6 +18,10 @@ UNKNOWN_STATE_COLOR = "0.5"
 CURVE_ALPHA = 0.35
 POINT_ALPHA = 0.6
 UNKNOWN_STATE_LABEL = "Unclassified"
+# Points whose landmarks broke a time-series rule (utils/landmark_temporal.py) get a ring.
+FLAG_EDGE_COLOR = "black"
+FLAG_RING_WIDTH = 1.2
+FLAG_LEGEND_LABEL = "Temporal flag"
 
 # Line color per seedling, so a seedling stays identifiable even where its
 # points all share one state color. Deliberately disjoint from STATE_COLORS'
@@ -47,7 +51,8 @@ class KinematicsWindow(tk.Toplevel):
     "(ungerminated)" so it's visually distinct rather than silently
     misleading (confirmed with user).
 
-    Points are colored by state and lines by seedling; see the two legends.
+    Points are colored by state (see the legend), lines by seedling; a black ring marks a frame whose
+    landmarks broke a time-series rule (utils/landmark_temporal.py).
     """
 
     def __init__(self, gui):
@@ -113,6 +118,7 @@ class KinematicsWindow(tk.Toplevel):
         # Which encodings actually occur, so each legend lists only what's on
         # screen rather than every state the reconstruction can produce.
         states_seen = []
+        any_flagged = False
         seedling_handles = []
 
         for crop_id, frame_results in sorted(self.gui.frame_results_by_crop.items()):
@@ -120,7 +126,7 @@ class KinematicsWindow(tk.Toplevel):
             time_zero = detector.get_time_zero(crop_id) if detector is not None else None
             unaligned = time_zero is None or time_zero >= len(x_axis_all)
 
-            xs, ys, colors, frames = [], [], [], []
+            xs, ys, colors, frames, flagged = [], [], [], [], []
             for frame_idx, result in enumerate(frame_results):
                 if result is None or frame_idx >= len(x_axis_all):
                     continue
@@ -137,6 +143,8 @@ class KinematicsWindow(tk.Toplevel):
                 frames.append(frame_idx)
                 state = result.get("state_dict", {}).get(seed_id)
                 colors.append(STATE_COLORS.get(state, UNKNOWN_STATE_COLOR))
+                readout = (result.get("landmarks") or {}).get(seed_id) or {}
+                flagged.append(bool(readout.get("temporal_flag")) and state != "Manual")
                 state_label = state if state in STATE_COLORS else UNKNOWN_STATE_LABEL
                 if state_label not in states_seen:
                     states_seen.append(state_label)
@@ -148,6 +156,9 @@ class KinematicsWindow(tk.Toplevel):
             xs_sorted = np.array(xs)[order]
             ys_sorted = np.array(ys)[order]
             colors_sorted = [colors[i] for i in order]
+            # per-point ring width (not edge colour: the scatter's alpha would make "none" edges show)
+            ring = [FLAG_RING_WIDTH if flagged[i] else 0.0 for i in order]
+            any_flagged = any_flagged or any(flagged)
 
             style = "--" if unaligned else "-"
             line_color = SEEDLING_LINE_COLORS[crop_id % len(SEEDLING_LINE_COLORS)]
@@ -156,7 +167,7 @@ class KinematicsWindow(tk.Toplevel):
             # Semi-transparent, so overlapping seedlings stay readable and outliers stand out.
             self.ax.plot(xs_plot, ys_sorted, style, color=line_color, linewidth=1, alpha=CURVE_ALPHA, zorder=1)
             points = self.ax.scatter(xs_plot, ys_sorted, c=colors_sorted, zorder=2, s=18, alpha=POINT_ALPHA,
-                                     edgecolors="none", picker=5)
+                                     edgecolors=FLAG_EDGE_COLOR, linewidths=ring, picker=5)
             self._pick_targets[points] = (crop_id, [frames[i] for i in order])
 
         if not any_plotted:
@@ -177,6 +188,9 @@ class KinematicsWindow(tk.Toplevel):
                        color=STATE_COLORS.get(s, UNKNOWN_STATE_COLOR), label=s)
                 for s in states_seen
             ]
+            if any_flagged:
+                state_handles.append(Line2D([], [], marker="o", linestyle="none", markerfacecolor="white",
+                                            markeredgecolor=FLAG_EDGE_COLOR, label=FLAG_LEGEND_LABEL))
             if state_handles:
                 self.ax.legend(handles=state_handles, title="State",
                                 fontsize=8, title_fontsize=8, loc="upper right")

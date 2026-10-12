@@ -82,7 +82,8 @@ def build_model(cfg: dict) -> UNetGNRes:
                       landmark_head=landmark_head,
                       landmark_hidden=int(cfg.get("landmark_hidden", 0)),
                       landmark_root=bool(cfg.get("landmark_root", False)),
-                      landmark_cotyl=bool(cfg.get("landmark_cotyl", False)))
+                      landmark_cotyl=bool(cfg.get("landmark_cotyl", False)),
+                      measurable_head=bool(cfg.get("measurable_head", False)))
 
     warm_start_from = cfg.get("warm_start_from")
     if warm_start_from:

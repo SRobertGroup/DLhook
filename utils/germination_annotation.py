@@ -16,7 +16,7 @@ per seedling, but it yields a label for every frame:
 Optionally the collar and one root-axis point are clicked on the onset frame, the
 same landmarks as utils/root_annotation.py.
 
-Frames are the crops you point it at: cropped_training_set holds every 5th source
+Frames are the crops you point it at: data/crops/cropped_training_set holds every 5th source
 frame, so the onset is resolved to that spacing. For a finer onset, re-crop the
 early frames with multi/recrop_plates.py --every-n 1 into another folder.
 """

@@ -9,7 +9,7 @@ pipeline against (docs/AUDIT.md, finding H-5).
 Run:
     python -m ui.angle_annotator --folder data/images
     python -m ui.angle_annotator --folder data/images --per-seedling 15 --seed 1
-    python -m ui.angle_annotator --folder cropped_training_set --split val   # multiclass training crops
+    python -m ui.angle_annotator --folder data/crops/cropped_training_set --split val   # multiclass training crops
 
 Per frame, click five points (mouse wheel zooms at the cursor):
     1. the JUNCTION where the cotyledons meet the hypocotyl
@@ -21,16 +21,16 @@ past closed. See utils/angle_annotation.py for the maths; the angle is stored
 in the app's bio convention (180 = closed, decreasing as it opens, > 180 =
 overhooked), so it compares directly with the exported `bio_angle`.
 
-Human-error study: --repeat-of angle_landmarks_train.csv,angle_ground_truth.csv --out angle_repeat.csv
+Human-error study: --repeat-of data/annotations/angles/angle_landmarks_train.csv,data/annotations/angles/angle_ground_truth.csv --out data/annotations/angles/angle_repeat.csv
 re-offers 200 already-measured frames blind (see utils/angle_annotation.repeat_queue); compare the two
 measurements with python -m multi.analyze_repeatability.
 
 Frames are a reproducible random sample (--per-seedling, --seed), grouped by
 seedling and shuffled within it so the annotation is blind to time order. The
-CSV (default: <repo>/angle_ground_truth.csv) is saved after every frame and
+CSV (default: data/annotations/angles/angle_ground_truth.csv) is saved after every frame and
 the tool resumes where you stopped.
 
-The multiclass training crops (cropped_training_set/, made by multi/recrop_plates.py)
+The multiclass training crops (data/crops/cropped_training_set/, made by multi/recrop_plates.py)
 work too: its manifest.csv is picked up automatically, which makes seedlings
 unique per (series, id) -- crop_id alone repeats across series -- and records
 the source frame as `img_name`. --split val keeps only crops from images held
@@ -286,7 +286,7 @@ def build_arg_parser():
                              "four-class model never trained on")
     parser.add_argument("--patch-index-dir", default=os.path.join(_REPO_ROOT, "multi", "processed", "patch_index"),
                         help="Where train_patches.csv / val_patches.csv are (for --split)")
-    parser.add_argument("--out", default=None, help="Ground-truth CSV (default: <repo>/angle_ground_truth.csv)")
+    parser.add_argument("--out", default=None, help="Ground-truth CSV (default: data/annotations/angles/angle_ground_truth.csv)")
     parser.add_argument("--per-seedling", type=int, default=10,
                         help="Random frames to annotate per seedling; 0 = every frame (default: 10)")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the frame sample (default: 0)")
@@ -313,7 +313,7 @@ def main(argv=None) -> int:
         root.destroy()
         if not folder:
             return 1
-    out_path = args.out or os.path.join(_REPO_ROOT, "angle_ground_truth.csv")
+    out_path = args.out or os.path.join(_REPO_ROOT, "data/annotations/angles/angle_ground_truth.csv")
     manifest = args.manifest or default_manifest(folder)
     if args.mark_unrecorded_skipped:
         queue = load_queue(folder, args.per_seedling or None, args.seed, manifest, args.split, args.patch_index_dir)

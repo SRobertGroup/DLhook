@@ -18,7 +18,7 @@
 #
 # Only crops in the TRAIN split can become landmark targets: crops of the validation
 # split (multi/processed/patch_index/val_patches.csv) are dropped even if annotated, so the
-# held-out frames in angle_ground_truth.csv stay a clean test set (score with
+# held-out frames in data/annotations/angles/angle_ground_truth.csv stay a clean test set (score with
 # python -m multi.validate_angles --landmark-checkpoint ...).
 # Paths are resolved against a data root: --data-root, else the
 # DLHOOK_DATA_ROOT env var, else the repo root (see multi/src/config.py).
@@ -36,9 +36,9 @@ paths:
   # (or merge_masks.py --from-probs) produces from those probability maps.
   # None of the three are the 441 human-annotated validation crops -- those
   # live under `evaluation:` below and are never part of the training run.
-  raw_data_dir: cropped_training_set
-  probability_maps_dir: cropped_training_set_seg
-  multiclass_masks_dir: cropped_training_set_labels
+  raw_data_dir: data/crops/cropped_training_set
+  probability_maps_dir: data/crops/cropped_training_set_seg
+  multiclass_masks_dir: data/crops/cropped_training_set_labels
   weights_cotyledon: weights/RootPainter_weights/cotyledon_v5.pkl
   weights_hypocotyl: weights/RootPainter_weights/hypocot_v5.pkl
   weights_radicle: weights/RootPainter_weights/germ_v2.pkl
@@ -63,7 +63,7 @@ evaluation:
 
 data:
   # Sized to the DATA, not to the inference tile. The hand-drawn crops are
-  # narrow strips: median 74 x 246 px, max width 232 (cropped_training_set/
+  # narrow strips: median 74 x 246 px, max width 232 (data/crops/cropped_training_set/
   # manifest.csv). At the old patch_size 572 every one of the 2384 crops was
   # narrower than the patch, so the median patch was 94.5% reflect-padding and
   # only 5.5% real content. 252 is the smallest valid UNetGNRes size
@@ -173,9 +173,9 @@ training:
 
 landmarks:
   enabled: true
-  # Written by: python -m ui.angle_annotator --folder cropped_training_set --split train \
-  #                 --out angle_landmarks_train.csv
-  csv: angle_landmarks_train.csv
+  # Written by: python -m ui.angle_annotator --folder data/crops/cropped_training_set --split train \
+  #                 --out data/annotations/angles/angle_landmarks_train.csv
+  csv: data/annotations/angles/angle_landmarks_train.csv
   # Fraction of annotated SEEDLINGS (all of a seedling's frames together) held out of landmark
   # training and used for model selection.
   val_fraction: 0.15

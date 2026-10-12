@@ -211,6 +211,12 @@ def landmark_cotyl_from_state_dict(state_dict: dict) -> bool:
     return False
 
 
+def measurable_from_state_dict(state_dict: dict) -> bool:
+    """True when the landmark head also has the image-level "measurable" logit (`cls_measurable.*`):
+    whether an annotator could measure the hook in this crop at all."""
+    return any(k.replace("module.", "", 1).startswith("cls_measurable.") for k in state_dict)
+
+
 def landmark_hidden_from_state_dict(state_dict: dict) -> int:
     """Width of the optional landmark trunk (`kp_trunk.*`), 0 when the head is the
     plain 1x1 `conv_kp` straight on the final features."""
@@ -222,7 +228,7 @@ def landmark_hidden_from_state_dict(state_dict: dict) -> int:
 
 class UNetGNRes(nn.Module):
     def __init__(self, im_channels=3, n_classes=2, head=HEAD_GROUPNORM, landmark_head=False, landmark_hidden=0,
-                 landmark_root=False, landmark_cotyl=False):
+                 landmark_root=False, landmark_cotyl=False, measurable_head=False):
         super().__init__()
         self.conv_in = nn.Sequential(
             nn.Conv2d(im_channels, 64, kernel_size=3, padding=1),  # padding 0
@@ -290,6 +296,13 @@ class UNetGNRes(nn.Module):
                 if self.landmark_cotyl:
                     self.conv_kp.bias[8] = -4.6          # cotyledon base heatmap
                     self.conv_kp.bias[9] = -4.6          # cotyledon tip heatmap
+            # Optional image-level "measurable" logit (could an annotator measure the hook here?),
+            # trained on the annotators' skip labels. Average- and max-pooled landmark features, so
+            # a small hook in a large crop is not averaged away. Absent by default: older
+            # checkpoints load and behave unchanged.
+            self.measurable_head = bool(measurable_head)
+            if self.measurable_head:
+                self.cls_measurable = nn.Linear(2 * width, 1)
 
     def _features(self, x):
         out1 = self.conv_in(x)
@@ -306,14 +319,21 @@ class UNetGNRes(nn.Module):
     def forward(self, x):
         return self.conv_out(self._features(x))
 
-    def forward_with_landmarks(self, x):
-        """(segmentation logits, landmark maps). The spatial outputs are the model's
-        raw (16-multiple) size: crop both to the label grid with align_output_to_target."""
+    def forward_with_landmarks(self, x, return_measurable=False):
+        """(segmentation logits, landmark maps), plus the (N,) "measurable" logit when
+        return_measurable=True (None for a model without that head). The spatial outputs are the
+        model's raw (16-multiple) size: crop both to the label grid with align_output_to_target."""
         if not self.landmark_head:
             raise RuntimeError("this model was built without landmark_head=True")
         feats = self._features(x)
         kp_feats = self.kp_trunk(feats) if self.landmark_hidden else feats
-        return self.conv_out(feats), self.conv_kp(kp_feats)
+        seg, kp = self.conv_out(feats), self.conv_kp(kp_feats)
+        if not return_measurable:
+            return seg, kp
+        if not getattr(self, "measurable_head", False):
+            return seg, kp, None
+        pooled = torch.cat([kp_feats.mean(dim=(2, 3)), kp_feats.amax(dim=(2, 3))], dim=1)
+        return seg, kp, self.cls_measurable(pooled).squeeze(1)
 
 
 def align_output_to_target(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

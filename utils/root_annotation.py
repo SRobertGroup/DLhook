@@ -12,8 +12,8 @@ so a landmark model can later learn the collar position and the root direction,
 and germination can be dated as the first frame with a visible radicle.
 
 A frame with radicle_visible = 0 stores no points. The work list is the set of
-frames already MEASURED in an angle CSV (angle_landmarks_train.csv,
-angle_ground_truth.csv), in time order -- not shuffled, because judging when a
+frames already MEASURED in an angle CSV (data/annotations/angles/angle_landmarks_train.csv,
+data/annotations/angles/angle_ground_truth.csv), in time order -- not shuffled, because judging when a
 radicle first appears needs the frames before it.
 """
 from __future__ import annotations

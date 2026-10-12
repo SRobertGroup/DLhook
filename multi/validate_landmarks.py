@@ -9,8 +9,8 @@ axes), junction, collar and root-direction errors, plus the cotyledon base and t
 often the tip drove the angle for a head that has them. Unlike multi/validate_angles.py it needs no
 manifest and no seedling series: one crop, one comparison.
 
-    python -m multi.validate_landmarks --truth angle_new.csv --root-truth angle_new_root.csv \
-        --folder cropped_new_set --checkpoints multi/results/models_landmarks_v4/best.pt,multi/results/models_landmarks_v6/best.pt
+    python -m multi.validate_landmarks --truth data/annotations/angles/angle_new.csv --root-truth data/annotations/angles/angle_new_root.csv \
+        --folder data/crops/cropped_new_set --checkpoints multi/results/models_landmarks_v4/best.pt,multi/results/models_landmarks_v6/best.pt
 
 A "+" inside one checkpoint entry (v6/best.pt+v11/best.pt) scores those checkpoints as an ensemble: their
 junction heatmaps, direction fields and optional maps are averaged before the readout

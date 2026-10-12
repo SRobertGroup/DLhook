@@ -15,7 +15,7 @@ precision curve never overlaps the teacher's at any operating point).
 
 The remaining structural explanation is a train/evaluate DOMAIN mismatch:
 
-- the student was TRAINED on `cropped_training_set/` -- tight per-seedling
+- the student was TRAINED on `data/crops/cropped_training_set/` -- tight per-seedling
   crops cut at native plate resolution, median 74x248 px (manifest.csv), one
   seedling filling the frame;
 - every evaluation so far RUNS on `training_dataset/dlhook/` -- 1024x1024
@@ -28,7 +28,7 @@ The remaining structural explanation is a train/evaluate DOMAIN mismatch:
   of the user's two clicks, padded 40% horizontally and 10% vertically, cut at
   native resolution with no resize (`seedling_measurement.py`, mirrored by
   `multi/src/recrop_geometry.compute_crop_box`) -- the same geometry family as
-  `cropped_training_set/`.
+  `data/crops/cropped_training_set/`.
 
 So the student may be being condemned on a framing it will never see. This
 script measures it in the framing it will.
@@ -67,7 +67,7 @@ most seedlings the "union of the three classes' foreground" is really one
 organ's strokes. The resulting box is a tight frame on that organ rather than
 on the whole seedling, and it frequently lands on
 `compute_crop_box`'s `min_box_half_size` floor (60x60). Compare the printed
-crop-size distribution against `cropped_training_set/manifest.csv`
+crop-size distribution against `data/crops/cropped_training_set/manifest.csv`
 (median 74x248) before trusting the result: if the crops do not resemble the
 training crops, this harness is not reproducing production geometry and its
 numbers mean nothing.
@@ -169,7 +169,7 @@ FRAMING_WHOLE_PLATE = "whole_plate"
 # is handed, so a larger number is faster and numerically identical.
 DEFAULT_CROP_BATCH_SIZE = 24
 
-# `cropped_training_set/manifest.csv`: the geometry the student was trained
+# `data/crops/cropped_training_set/manifest.csv`: the geometry the student was trained
 # on, and therefore the target the crops this script cuts must resemble for
 # the measurement to mean anything.
 TRAINING_CROP_MEDIAN_WIDTH = 74
@@ -208,7 +208,7 @@ Secondary caveat: most annotated images carry strokes for only one of the
 three classes, so for most seedlings the union-of-classes box frames one organ
 rather than the whole seedling and often lands on compute_crop_box's 60x60
 min_box_half_size floor. Check the crop-size distribution printed above
-against cropped_training_set/manifest.csv (median {w}x{h}) before trusting
+against data/crops/cropped_training_set/manifest.csv (median {w}x{h}) before trusting
 anything here: crops that do not resemble the training crops mean this harness
 is not reproducing production geometry.""".format(
     w=TRAINING_CROP_MEDIAN_WIDTH, h=TRAINING_CROP_MEDIAN_HEIGHT
@@ -327,7 +327,7 @@ def crop_probability_map(prob: np.ndarray, bounds) -> np.ndarray:
 
 def crop_size_summary(sizes) -> dict:
     """Descriptive stats for the (width, height) of every crop cut, so the run
-    can be checked against `cropped_training_set/manifest.csv` before its
+    can be checked against `data/crops/cropped_training_set/manifest.csv` before its
     scores are believed."""
     sizes = list(sizes)
     summary = {"n_crops": len(sizes)}
@@ -365,7 +365,7 @@ def _print_crop_size_summary(summary: dict, n_source_images: int) -> None:
     print(f"crops pinned at the 60x60 box floor   : {summary['fraction_at_min_box_floor']:.1%}")
     print(f"training-set crops, for comparison    : median "
           f"{TRAINING_CROP_MEDIAN_WIDTH}x{TRAINING_CROP_MEDIAN_HEIGHT} "
-          f"(cropped_training_set/manifest.csv)")
+          f"(data/crops/cropped_training_set/manifest.csv)")
 
 
 # --- legacy-vs-production comparison ---------------------------------------

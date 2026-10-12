@@ -36,22 +36,22 @@ SEG_SUFFIXES = ("cotyledon", "hypocotyl", "radicle")
 
 DEFAULT_SETS = {
     "training": {
-        "dir": "cropped_training_set", "boxes": "crop_boxes.json", "keep": [0],
-        "csvs": ["angle_landmarks_train.csv", "angle_landmarks_train_root.csv",
-                 "angle_landmarks_train.csv.review.csv", "angle_ground_truth.csv", "angle_repeat.csv",
-                 "germination_train.csv"],
-        "crop_dirs": ["cropped_training_set_labels", "multi/processed/masks_multiclass_preview"],
-        "seg_dir": "cropped_training_set_seg",
+        "dir": "data/crops/cropped_training_set", "boxes": "data/crop_boxes/crop_boxes.json", "keep": [0],
+        "csvs": ["data/annotations/angles/angle_landmarks_train.csv", "data/annotations/angles/angle_landmarks_train_root.csv",
+                 "data/annotations/angles/angle_landmarks_train.csv.review.csv", "data/annotations/angles/angle_ground_truth.csv", "data/annotations/angles/angle_repeat.csv",
+                 "data/annotations/germination/germination_train.csv"],
+        "crop_dirs": ["data/crops/cropped_training_set_labels", "multi/processed/masks_multiclass_preview"],
+        "seg_dir": "data/crops/cropped_training_set_seg",
         "patch_index": ["multi/processed/patch_index/train_patches.csv", "multi/processed/patch_index/val_patches.csv"],
     },
     "new": {
-        "dir": "cropped_new_set", "boxes": "crop_boxes_new_filtered.json", "keep": [3],
-        "csvs": ["angle_new.csv", "angle_new_root.csv", "angle_repeat_new.csv", "germination_new.csv"],
+        "dir": "data/crops/cropped_new_set", "boxes": "data/crop_boxes/crop_boxes_new_filtered.json", "keep": [3],
+        "csvs": ["data/annotations/angles/angle_new.csv", "data/annotations/angles/angle_new_root.csv", "data/annotations/angles/angle_repeat_new.csv", "data/annotations/germination/germination_new.csv"],
         "crop_dirs": [], "seg_dir": None, "patch_index": [],
     },
     "open": {
-        "dir": "cropped_open_set", "boxes": "crop_boxes_open.json", "keep": [0],
-        "csvs": ["angle_open.csv"], "crop_dirs": [], "seg_dir": None, "patch_index": [],
+        "dir": "data/crops/cropped_open_set", "boxes": "data/crop_boxes/crop_boxes_open.json", "keep": [0],
+        "csvs": ["data/annotations/angles/angle_open.csv"], "crop_dirs": [], "seg_dir": None, "patch_index": [],
     },
 }
 
@@ -199,7 +199,7 @@ def plan_set(plan: Plan, name: str, cfg: dict, series: str, target: str):
 
     # --- boxes ----------------------------------------------------------------------------
     # The manifest is the record of what was cut. A boxes file is only rewritten while it still agrees
-    # with it (crop_boxes_new_filtered.json no longer does); a stale one is left alone and reported.
+    # with it (data/crop_boxes/crop_boxes_new_filtered.json no longer does); a stale one is left alone and reported.
     bp = root / cfg["boxes"]
     if bp.exists():
         boxes = json.loads(bp.read_text(encoding="utf-8"))

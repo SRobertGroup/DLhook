@@ -76,6 +76,26 @@ def build_loss(cfg: dict) -> nn.Module:
 DEFAULT_LANDMARK_WEIGHTS = {"hm": 1.0, "paf": 1.0, "collar": 1.0, "root": 1.0, "cotyl": 1.0}
 
 
+def measurable_loss(logit, targets: dict, weight: float = 1.0, pos_weight: float = 1.0):
+    """Binary cross-entropy of the image-level "measurable" logit (N,) against targets["measurable"],
+    averaged over the tiles with targets["has_measurable"] == 1 (a skipped crop's tiles, and the
+    junction tile of a measured crop). Kept apart from landmark_loss on purpose: that one returns
+    zero for a batch without a junction, which a batch of skipped tiles always is. `pos_weight`
+    up-weights the measurable class. Returns (weighted loss, unweighted float)."""
+    if logit is None or "has_measurable" not in targets or weight == 0:
+        zero = (logit.sum() * 0.0) if logit is not None else torch.zeros(())
+        return zero, 0.0
+    has = targets["has_measurable"].float()
+    n = has.sum()
+    if float(n) == 0.0:
+        return logit.sum() * 0.0, 0.0
+    bce = F.binary_cross_entropy_with_logits(
+        logit.float(), targets["measurable"].float(), reduction="none",
+        pos_weight=torch.tensor(float(pos_weight), device=logit.device))
+    loss = (bce * has).sum() / n
+    return weight * loss, float(loss.detach())
+
+
 def landmark_loss(kp_logits: torch.Tensor, targets: dict,
                   weights: dict | None = None):
     """Loss for the optional landmark head (models/unet.py: forward_with_landmarks),

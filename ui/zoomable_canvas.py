@@ -159,7 +159,11 @@ class ZoomableImageCanvas(tk.Canvas):
             elif shape["kind"] == "point":
                 cx, cy = to_canvas(shape["xy"])
                 r = ANGLE_MARKER_RADIUS_PX + 1
-                self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline="white", tags="overlay")
+                if shape.get("hollow"):            # a reference position, not a reading
+                    r += 2
+                    self.create_oval(cx - r, cy - r, cx + r, cy + r, fill="", outline=color, width=2, tags="overlay")
+                else:
+                    self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline="white", tags="overlay")
                 if shape.get("label"):
                     self.create_text(cx + r + 3, cy - r - 3, text=shape["label"], anchor=tk.SW,
                                      fill=color, font=("Helvetica", 10, "bold"), tags="overlay")

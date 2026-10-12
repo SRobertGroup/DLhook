@@ -45,8 +45,6 @@ models/superres/.vscode/
 data/predict/
 data/postprocess/
 data/test_prediction/
-data/debug_data/
-data/json_data/
 data/final_prediction/
 data/images/
 
@@ -56,3 +54,6 @@ multi/results/
 
 training_dataset/
 cropped_*/
+
+# Scratch outputs that older versions wrote into the working directory
+img_angle_data.csv

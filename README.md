@@ -6,9 +6,9 @@
 
 **Lead Development:** David Radianu, Adrien Heymans
 
-**Contributors:** Siamsa Doyle, Hemamshu Ratnakaram
+**Contributors:** Sara Raggi, Siamsa Doyle, Hemamshu Ratnakaram, Sandeep Yadav
 
-**Coordination:** Stéphanie Robert, Sara Raggi
+**Coordination:** Stéphanie Robert, Adrien Heymans
 
 
 ![DLhook](docs/img/header.png)
@@ -21,23 +21,23 @@
 
 The pipeline has four stages:
 
-1. **Segmentation.** A U-Net with group normalisation and residual connections (`UNetGNRes`, PyTorch) segments each cropped seedling into **cotyledon** and **hypocotyl** (the overlays you review and correct, plus the hypocotyl mask that length, curvature and diameter are measured on). A separate learned detector finds **germination** (the emerging radicle), which fixes time zero for each seedling independently; the radicle itself is no longer segmented. Earlier versions ran three separate two-class models and fitted ellipses; both paths are retained and can still be selected — see [Which segmentation models run](#which-segmentation-models-run) and [Which angle method runs](#which-angle-method-runs).
+1. **Segmentation.** A U-Net with group normalisation and residual connections (`UNetGNRes`, PyTorch) segments each cropped seedling into **cotyledon** and **hypocotyl** (thin overlays to judge the reading against, plus the hypocotyl mask that length, curvature and diameter are measured on). A separate learned detector finds **germination** (the emerging radicle), which fixes time zero for each seedling independently; the radicle itself is no longer segmented. Earlier versions ran three separate two-class models and fitted ellipses; both paths are retained and can still be selected — see [Which segmentation models run](#which-segmentation-models-run) and [Which angle method runs](#which-angle-method-runs).
 2. **Geometry.** For every frame, an ensemble of three landmark networks reads the cotyledon/hypocotyl **junction** and the direction of each axis directly from the crop, then computes the angle between them (`raw_angle`). On the hypocotyl mask DLhook also measures its length, curvature and diameter.
-3. **Temporal reconstruction.** Per-frame readings are noisy and periodically ambiguous. A reconstruction pass resolves each frame against the whole series, producing a continuous biological angle (`bio_angle`) and a state (`Closed` / `Opening`).
-4. **Review and export.** Every seedling can be inspected frame by frame, its landmarks and angle overridden by hand before the results are written to a `.CSV`.
+3. **Temporal reconstruction.** Each seedling's frames are read as one series: frames with no usable information are rejected, short gaps are interpolated, and every frame gets a biological angle (`bio_angle`) and a state (`Closed` / `Opening` / `Unreadable`). Frames whose collar or junction breaks the way a seedling grows are flagged for review.
+4. **Review and export.** Every seedling can be inspected frame by frame and its landmarks placed by hand before the results are written to a `.CSV`.
 
 The network architecture and the trained weights derive from [RootPainter](https://github.com/Abe404/root_painter). Inference runs on [PyTorch](https://pytorch.org/).
 
 ```mermaid
 flowchart LR
-    A["Image time series\n(one directory)"] --> B["Per-seedling crops\n(start/end points)"]
+    A["Image time series\n(one directory)"] --> B["Per-seedling crops\n(drawn boxes)"]
     B --> C1["Cotyledon + hypocotyl\nsegmentation"]
     B --> C2["Landmark ensemble\n(junction + directions)"]
     B --> C3["Germination\ndetection (learned)"]
     C2 --> D["Per-frame geometry\n(raw_angle, traits)"]
     C1 --> D
     C3 --> E["Time zero\nper seedling"]
-    D --> F["Temporal reconstruction\n(bio_angle, state)"]
+    D --> F["Temporal reconstruction\n(bio_angle, state, flags)"]
     E --> F
     F --> G["CSV export"]
     F --> H["Kinematics plot"]
@@ -95,7 +95,7 @@ pip3 install --no-cache-dir -r requirements.txt
 Dependencies, all pinned (see [`requirements.txt`](requirements.txt) and [`env.yaml`](env.yaml)): `torch`, `torchvision`, `numpy`, `pandas`, `pillow`, `matplotlib`, `scikit-image`, `opencv-python`, `PyYAML`, `tqdm`, `basicsr` and `realesrgan`.
 
 > [!TIP]
-> A GPU is optional but strongly recommended — segmentation is roughly **8× faster** on CUDA. Match the CUDA version to your driver; `env.yaml` installs the CUDA 12.8 build, which recent GPU generations (Blackwell) need; change `cu128` to `cu126` for an older driver. Super-resolution of the crops only runs when CUDA is available. DLhook checks that CUDA actually works (a tiny test operation) before using the GPU and falls back to the CPU with a warning when it does not; `DLHOOK_DEVICE=cpu` forces the CPU.
+> A GPU is optional but strongly recommended — segmentation is roughly **8× faster** on CUDA. Match the CUDA version to your driver; `env.yaml` installs the CUDA 12.8 build, which recent GPU generations (Blackwell) need; change `cu128` to `cu126` for an older driver. DLhook checks that CUDA actually works (a tiny test operation) before using the GPU and falls back to the CPU with a warning when it does not; `DLHOOK_DEVICE=cpu` forces the CPU.
 
 ### 3. Start DLhook
 
@@ -127,11 +127,7 @@ Results therefore differ between machines that do not hold the same files: check
 
 The legacy paths use the three two-class RootPainter models (`cotyledon_v5.pkl`, `hypocot_v5.pkl`, `germ_v1.pkl`, all in [`weights/RootPainter_weights/`](weights/RootPainter_weights/)).
 
-A further model, Real-ESRGAN (`models/superres/RealESRGAN_x4plus.pth`), can super-resolve crops on
-CUDA, but it is **off by default** (`DLHOOK_SUPERRES=1` turns it on): the landmark models were built on plain
-crops, and super-resolved crops raised their validation error from 20.6 to 34.3 degrees. The 64 MB file is not in the repository: it is downloaded from the
-official Real-ESRGAN release on first use and checked against a pinned SHA-256
-(`models/superres/weights_info.py`); a file already at that path is used as is.
+A further model, Real-ESRGAN (`models/superres/RealESRGAN_x4plus.pth`), can super-resolve crops on CUDA, but it is **off by default** (`DLHOOK_SUPERRES=1` turns it on): the landmark models were built on plain crops, and super-resolved crops raised their validation error from 20.6 to 34.3 degrees. The 64 MB file is not in the repository: it is downloaded from the official Real-ESRGAN release on first use and checked against a pinned SHA-256 (`models/superres/weights_info.py`); a file already at that path is used as is.
 
 ### Which angle method runs
 
@@ -149,7 +145,20 @@ DLHOOK_LANDMARK_GATE=0 python main.py          # keep every landmark reading (no
 
 On the final BerryBox v2 validation set (287 hand-measured frames, plants no model had seen) the landmark ensemble has a mean error of **13.9°** (median **7.2°**), against **26.8°** for the ellipse pipeline; repeating your own measurement by hand differs by **4.2°** on average (see [`docs/AUDIT.md`](docs/AUDIT.md), §8). The landmark angle is a folded angle, `180 - theta`; the automatic overhook flag is exported separately and does not change `bio_angle`. Landmarks are read from the plain crop, so they need no segmentation mask: an angle exists even where a mask is empty.
 
-**Readability gate.** The ensemble would otherwise read an angle on frames with no usable information (an annotator would skip them). A logistic gate on the junction peak, the cotyledon-tip peak and the disagreement between the three networks flags such frames: they get no angle (`bio_angle` empty, state `Unreadable`), are never interpolated across, and show the model's rejected reading in grey in the analysis window (you can still place the landmarks by hand, which overrides the gate). On BerryBox v2 it rejects 68% of the skipped frames while keeping 99% of the measured ones. Set `DLHOOK_LANDMARK_GATE=0` before launching to disable it (every frame then keeps its reading; `unreadable_p` is still exported).
+**Readability gate.** The ensemble reads an angle on every frame, including frames with no usable information (the ones an annotator would skip). A gate rejects such frames:
+
+- a rejected frame gets no angle (`bio_angle` empty, state `Unreadable`) and is never interpolated across;
+- the analysis window still shows the rejected reading, in grey, and placing the landmarks by hand overrides the gate;
+- `DLHOOK_LANDMARK_GATE=0` disables it (every frame keeps its reading; `unreadable_p` is still exported).
+
+The gate is a logistic rule on the junction peak, the cotyledon-tip peak and the disagreement between the three networks. On BerryBox v2 it rejects 68% of the skipped frames while keeping 99% of the measured ones. Landmark models that carry the learned **measurable** output (an image-level head trained on the frames annotators skipped) are gated on that output instead, and `measurable_p` is exported.
+
+**Time-series checks.** Two facts of a growing seedling are checked across each seedling's frames:
+
+- the collar barely moves (median 2.6 px between annotated frames);
+- the junction moves away from the collar as the hypocotyl elongates (the distance grew in 99.7% of 737 annotated frame pairs).
+
+A frame is **flagged, not changed**, when its collar jumps away from the seedling's stable collar (by more than 15 px, or more than a quarter of the junction–collar distance), or when its junction moves back toward the collar by more than 5 px. A flagged frame is drawn in amber in the analysis window, with the seedling's usual collar as a hollow ring and a one-line explanation; its point gets a black ring in the kinematics plot; and the export names the check in `temporal_flag`. A manual edit is trusted and clears the flag.
 
 ### Which segmentation models run
 
@@ -164,10 +173,7 @@ Set `DLHOOK_SEG_BACKEND` before launching to choose:
 DLHOOK_SEG_BACKEND=binary python main.py     # legacy three-model path
 ```
 
-With no radicle mask the area-rule germination fallback is unavailable: when the learned detector cannot run, germination is reported as **unknown** (empty cell, with a warning) rather than guessed. The value is read once when the application starts, so it cannot be changed
-part-way through a session — this is deliberate, so that one set of results can never mix
-output from two different models. An unrecognised value stops the program with an error
-rather than silently falling back.
+With no radicle mask the area-rule germination fallback is unavailable: when the learned detector cannot run, germination is reported as **unknown** (empty cell, with a warning) rather than guessed. The value is read once when the application starts, so it cannot be changed part-way through a session: one set of results can never mix output from two different models. An unrecognised value stops the program with an error rather than silently falling back.
 
 ![Example of a good hypocotyl segmentation](docs/img/Good_segmentation_RootPainter_hypocotyl.png)
 
@@ -244,12 +250,12 @@ When it finishes, the status reads *"Analysis complete -- use Preview seedling t
 Opens a picker; choose a seedling to open its **`Seedling N - analysis`** window. This is where all reviewing and correcting happens.
 
 **Viewing**
-- `Launch segmentation` — only needed if this seedling has not been segmented yet.
+- `Launch segmentation`: only needed if this seedling has not been segmented yet. Re-segmenting replaces the seedling's results, so you are asked first when it holds manual frames.
 - `Show:` `Cotyledon` (green alpha contour) · `Hypocotyl` (yellow smoothed midline) · `Landmarks` (junction, axes and arrows of the current reading, model or manual) · `Germination` (magenta contour, off by default; only shown with the legacy `binary` backend, which still segments the radicle).
 - `<--` / `-->` step through frames.
 - `Zoom +` / `Zoom -` / `Reset zoom`, or the mouse wheel.
 
-The raw image is shown at full intensity; the overlays are thin lines only, so you can judge the angle against the pixels. There is no mask editing.
+The raw image is shown at full intensity; the overlays are thin lines only, so you can judge the angle against the pixels. There is no mask editing. A reading drawn in **grey** was rejected by the readability gate; one drawn in **amber** broke a time-series check (see [Which angle method runs](#which-angle-method-runs)) and the line under the angle says which.
 
 **Overriding the angle by hand (landmarks)**
 
@@ -264,7 +270,7 @@ The raw image is shown at full intensity; the overlays are thin lines only, so y
 
 The prompt in the status line names the next click. The angle is complete after C2; `Enter` applies the landmarks (the two optional points can be left out), `BackSpace` undoes the last point and `Escape` resets. Anywhere in the window, `←` / `→` step through the frames and `↑` / `↓` (or the `▲ Seedling` / `Seedling ▼` buttons) open the previous / next seedling at the same frame, in the same place on screen. Once C2 is placed, the `Overhook` box is **ticked automatically** when the cotyledon ray crosses the hypocotyl ray (the same test as for the model's reading); you can still tick or untick it. `Apply landmarks` commits the frame as **Manual** (an overhooked hook is stored as `180 + theta`, otherwise `180 - theta`), recomputes the hypocotyl traits with your collar (or the model's) and re-reconstructs the series around your frame. `Blank this frame` discards the frame's measurement entirely — use it when the seedling has rotated so the cotyledon sits in front of or behind the hypocotyl, since a 2D image cannot yield a correct angle in that case.
 
-**Saving corrections for retraining.** Tick `Save edits for retraining` (you are asked for a folder once). Each `Apply landmarks` then writes a JSON record (the clicked points, the overhook tick, the model reading it replaced) and a copy of the crop to that folder,. Convert the records into annotation CSVs and a crop folder that the landmark training code reads with
+**Saving corrections for retraining.** Tick `Save edits for retraining` (you are asked for a folder once). Each `Apply landmarks` then writes a JSON record (the clicked points, the overhook tick, the model reading it replaced) and a copy of the crop to that folder. Convert the records into annotation CSVs and a crop folder that the landmark training code reads with
 
 ```bash
 python -m multi.edits_to_csv path/to/landmark_edits --out-prefix angle_edits
@@ -282,7 +288,7 @@ and add the result to `landmarks.extra_sources` in the training config (see [Tra
 
 Plots angle against time for all seedlings at once. Time is measured **since germination**, in hours when timestamps are available, otherwise in frames.
 
-Two legends: **State** (marker colour — Closed, Opening, Manual, Unclassified) and **Seedling** (line colour). A **dashed** line means no germination frame was found for that seedling, so its time axis is not aligned to the others. The grey horizontal line marks 180° — a fully closed hook.
+The legend gives the **State** (marker colour: Closed, Opening, Manual, Unclassified); a black ring marks a **temporal flag**. `Unreadable` frames have no angle and are not plotted. Each seedling has its own line colour; clicking a point opens that seedling at that frame. A **dashed** line means no germination frame was found for that seedling, so its time axis is not aligned to the others. The grey horizontal line marks 180° — a fully closed hook.
 
 The plot does not auto-update; click `Refresh` after making corrections.
 
@@ -321,11 +327,14 @@ The exported CSV is in **long format** — one row per seedling per frame. The f
 | `overhook_flag` | 1 when the cotyledon ray crosses the hypocotyl ray (overhooked), else 0. It is informational: **it does not change `bio_angle`**, which stays `180 - theta` (a manual edit with `Overhook` ticked stores `180 + theta`) |
 | `unreadable_p` | probability that the frame carries no usable information (readability gate; empty for manual frames) |
 | `unreadable` | 1 when the gate rejected the frame (then `bio_angle` is empty and `state` is `Unreadable`), else 0 |
+| `measurable_p` | the learned head's probability that an annotator could measure this frame (empty with models that lack the head) |
+| `temporal_flag` | `collar`, `junction` or `collar+junction` when the frame broke a time-series check, else empty. Flag only: the angle is kept |
 | `junction_x`, `junction_y` | the cotyledon/hypocotyl junction |
 | `hypo_dir_x`, `hypo_dir_y` | direction of the hypocotyl axis, away from the junction |
 | `cotyl_dir_x`, `cotyl_dir_y` | direction of the cotyledon axis, base to tip |
 | `cotyl_base_x`, `cotyl_base_y`, `cotyl_tip_x`, `cotyl_tip_y` | cotyledon base and tip |
 | `collar_x`, `collar_y` | hypocotyl/root junction (collar), when available |
+| `collar_ref_x`, `collar_ref_y` | the seedling's stable collar around this frame (rolling median), the reference of the collar check |
 | `root_dir_x`, `root_dir_y` | root direction, when available |
 
 **Hypocotyl traits** (measured on the binary `hypocot_v5` hypocotyl mask; empty when there is no mask or no junction):
@@ -343,10 +352,10 @@ The exported CSV is in **long format** — one row per seedling per frame. The f
 > The hypocotyl traits are **not yet validated** against hand measurements. Treat absolute values with care until they have been compared with manual length and diameter readings.
 
 ```csv
-img_name,seedling_id,raw_angle,state,bio_angle,time_elapsed_min,germination_frame,angle_source,landmark_edit,landmark_peak,overhook_flag,unreadable_p,unreadable,junction_x,junction_y,...
-Col0_001.tif,1,178,Closed,179,0,,landmarks,model,0.93,0,36.2,41.5,...
-Col0_001.tif,2,175,Closed,176,60,,landmarks,model,0.91,0,30.8,38.0,...
-Col0_002.tif,1,172,Closed,174,120,,landmarks,model,0.95,0,36.4,41.1,...
+img_name,seedling_id,raw_angle,state,bio_angle,time_elapsed_min,germination_frame,angle_source,landmark_edit,landmark_peak,overhook_flag,unreadable_p,unreadable,measurable_p,temporal_flag,junction_x,junction_y,...
+Col0_001.tif,1,2.1,Closed,177.9,0,,landmarks,model,0.93,0,0.04,0,,,36.2,41.5,...
+Col0_001.tif,2,4.8,Closed,175.2,0,,landmarks,model,0.91,0,0.07,0,,,30.8,38.0,...
+Col0_002.tif,1,5.6,Closed,174.4,60,,landmarks,model,0.95,0,0.03,0,,junction,36.4,41.1,...
 ```
 
 Missing or unmeasurable values are written as empty strings.
@@ -370,10 +379,10 @@ python -m ui.angle_annotator --folder path/to/crops --per-seedling 15 --seed 1
 
 DLhook writes the plain (not super-resolved) crops to `data/images/` during *Start Analysis*, but wipes `data/` at startup and exit, so copy them to a folder of your own first if you want to annotate across sessions.
 
-You can also annotate the crops used to train the four-class model (`cropped_training_set/`, made by `multi/recrop_plates.py`). Its `manifest.csv` is picked up automatically, which keeps each series' seedlings apart (`crop_id` repeats across series) and records the source frame as `img_name`. Add `--split val` to keep only images the four-class model never trained on, which is the unbiased set to validate it with:
+You can also annotate the crops used to train the four-class model (`data/crops/cropped_training_set/`, made by `multi/recrop_plates.py`). Its `manifest.csv` is picked up automatically, which keeps each series' seedlings apart (`crop_id` repeats across series) and records the source frame as `img_name`. Add `--split val` to keep only images the four-class model never trained on, which is the unbiased set to validate it with:
 
 ```bash
-python -m ui.angle_annotator --folder cropped_training_set --split val
+python -m ui.angle_annotator --folder data/crops/cropped_training_set --split val
 ```
 
 For each frame, click five points (the mouse wheel zooms at the cursor, and the zoom is kept between frames of the same seedling):
@@ -382,11 +391,11 @@ For each frame, click five points (the mouse wheel zooms at the cursor, and the 
 2. two points on the **hypocotyl** axis,
 3. two points on the **cotyledon** axis.
 
-Each axis is oriented automatically away from the junction, so the order of the two points on an axis does not matter. Tick **Overhook** if the hook has folded back past closed. Press `Enter` to save and move on, `Backspace` to undo a point and `S` (or `Right` / *Next*) to skip a frame you cannot measure. Moving on from a frame you did not measure records it as **skipped**, so the CSV tells "looked at and rejected" apart from "not reached yet"; `Left` goes back without recording anything. If a CSV predates this behaviour, `python -m ui.angle_annotator --folder cropped_training_set --split val --mark-unrecorded-skipped` records every frame of the same sample that has no row as skipped (use the same `--folder`, `--split`, `--per-seedling` and `--seed` as the session) and exits without opening the window.
+Each axis is oriented automatically away from the junction, so the order of the two points on an axis does not matter. Tick **Overhook** if the hook has folded back past closed. Press `Enter` to save and move on, `Backspace` to undo a point and `S` (or `Right` / *Next*) to skip a frame you cannot measure. Moving on from a frame you did not measure records it as **skipped**, so the CSV tells "looked at and rejected" apart from "not reached yet"; `Left` goes back without recording anything. If a CSV predates this behaviour, `python -m ui.angle_annotator --folder data/crops/cropped_training_set --split val --mark-unrecorded-skipped` records every frame of the same sample that has no row as skipped (use the same `--folder`, `--split`, `--per-seedling` and `--seed` as the session) and exits without opening the window.
 
 To compare your measurements with the pipeline, run `python -m multi.validate_angles`. It runs the real pipeline with both backends on every crop of the seedlings you measured and prints the error per backend and per series (written to `multi/results/angle_validation/`).
 
-Frames are a reproducible random sample (`--per-seedling`, `--seed`), grouped by seedling and shuffled within it so you cannot be guided by time order. Results go to `angle_ground_truth.csv` in the repository root (change with `--out`). The file is saved after every frame, and the tool resumes where you stopped. `bio_angle` uses the same convention as the exported CSV (180 = closed, decreasing as the hook opens, above 180 = overhooked), and `seedling_id` and `frame` match the crop file names (plus `series` and `img_name` for the training crops), so the two can be joined directly.
+Frames are a reproducible random sample (`--per-seedling`, `--seed`), grouped by seedling and shuffled within it so you cannot be guided by time order. Results go to `data/annotations/angles/angle_ground_truth.csv` in the repository (change with `--out`). The file is saved after every frame, and the tool resumes where you stopped. `bio_angle` uses the same convention as the exported CSV (180 = closed, decreasing as the hook opens, above 180 = overhooked), and `seedling_id` and `frame` match the crop file names (plus `series` and `img_name` for the training crops), so the two can be joined directly.
 
 ## Reviewing earlier annotations
 
@@ -394,23 +403,23 @@ Frames are a reproducible random sample (`--per-seedling`, `--seed`), grouped by
 
 ```bash
 # measured frames, the ones the model disagrees with most first
-python -m multi.validate_landmarks --truth angle_landmarks_train.csv --folder cropped_training_set --checkpoints multi/results/models_landmarks_v6/best.pt --per-crop-out multi/results/review_errors/train
-python -m ui.angle_reviewer --folder cropped_training_set --csv angle_landmarks_train.csv --errors multi/results/review_errors/train/models_landmarks_v6.csv
+python -m multi.validate_landmarks --truth data/annotations/angles/angle_landmarks_train.csv --folder data/crops/cropped_training_set --checkpoints weights/landmarks/dlhook_landmarks_a.pt+weights/landmarks/dlhook_landmarks_b.pt+weights/landmarks/dlhook_landmarks_c.pt --per-crop-out multi/results/review_errors/train
+python -m ui.angle_reviewer --folder data/crops/cropped_training_set --csv data/annotations/angles/angle_landmarks_train.csv --errors multi/results/review_errors/train/<per-crop CSV written above>
 
 # frames you skipped after the seedling germinated (before germination there is nothing to measure)
-python -m ui.angle_reviewer --folder cropped_training_set --csv angle_landmarks_train.csv --skipped --germination germination_train.csv
+python -m ui.angle_reviewer --folder data/crops/cropped_training_set --csv data/annotations/angles/angle_landmarks_train.csv --skipped --germination data/annotations/germination/germination_train.csv
 ```
 
 Each frame opens with your five clicks. `Enter` keeps them (or saves five you re-clicked after `X`), `R` marks **rotation** (the cotyledons pass in front of or behind the hypocotyl, so no angle is measured), `N` marks **no angle** for another reason, `S` / `Right` moves on without recording anything. The tool resumes where you stopped.
 
 ## Training a landmark head from your annotations
 
-The same clicks can retrain the four-class model to find the cotyledon/hypocotyl **junction** and the two axis directions directly, instead of fitting ellipses. That removes the direction ambiguity of an ellipse. The landmark angle is always `180 - theta`: there is no overhook reading, because overhooked frames sit only a few degrees past 180° (median 6.5°), below the repeatability of the clicks themselves (your own repeat measurements differ by about 4° at the median, and the overhook call by 8%).
+The same clicks train the landmark head: it finds the cotyledon/hypocotyl **junction** and the two axis directions directly, which removes the direction ambiguity of a fitted ellipse. The landmark angle is always `180 - theta`. The network has no overhook output, because overhooked frames sit only a few degrees past 180° (median 6.5°), below the repeatability of the clicks themselves (your own repeat measurements differ by about 4° at the median, and the overhook call by 8%); the exported `overhook_flag` is a geometric test on the reading and does not change the angle.
 
 **1. Annotate training frames** (never reuse your test set):
 
 ```bash
-python -m ui.angle_annotator --folder cropped_training_set --split train --out angle_landmarks_train.csv --per-seedling 10 --seed 1
+python -m ui.angle_annotator --folder data/crops/cropped_training_set --split train --out data/annotations/angles/angle_landmarks_train.csv --per-seedling 10 --seed 1
 ```
 
 Aim for at least 400 measured frames spread over the series. Click the same way every time, because the model learns exactly what you click:
@@ -420,7 +429,7 @@ Aim for at least 400 measured frames spread over the series. Click the same way 
 - **cotyledon** points: on the midline of the cotyledon. The **first** click is its **base**, at the junction, and the **last** click is its **tip** (once the two cotyledons have separated, the midpoint between the two tips). The model reads the cotyledon direction as base to tip, which is what tells an open hook from a closed one;
 - the **Overhook** tick is still recorded in the CSV but ignored by landmark training and by `multi/validate_angles.py` (which scores against `180 - theta`; `--keep-overhook` restores the raw angle).
 
-`--split train` keeps your frames out of the validation split, and the training code drops any validation-split crop it finds in the CSV anyway, so `angle_ground_truth.csv` stays a clean test set.
+`--split train` keeps your frames out of the validation split, and the training code drops any validation-split crop it finds in the CSV anyway, so `data/annotations/angles/angle_ground_truth.csv` stays a clean test set.
 
 **2. Fine-tune** from the shipped four-class checkpoint (adds a landmark head, keeps the segmentation):
 
@@ -428,7 +437,9 @@ Aim for at least 400 measured frames spread over the series. Click the same way 
 python multi/train_unet_multiclass.py --config multi/configs/training_landmarks.yaml
 ```
 
-The first epochs train only the new head, then the whole network. The best epoch is chosen by the angle error on held-out annotated seedlings, among epochs whose segmentation score stays above `landmarks.min_mean_fg_dice`. Checkpoints go to `multi/results/models_landmarks/`.
+The first epochs train only the new head, then the whole network (`landmarks.head_only_epochs`). The best epoch is chosen by the angle error on held-out annotated seedlings, among epochs whose segmentation score stays above `landmarks.min_mean_fg_dice`. Checkpoints go to `multi/results/models_landmarks/`.
+
+The shipped ensemble was trained with `multi/configs/training_landmarks_all_{a,b,c}.yaml`: every annotated set, the landmark head only (the segmentation stays the four-class model's), three seeds. The `_m` variants of those configs add the measurable output on top of a shipped member (`python -m multi.validate_measurable` scores it).
 
 **3. Score it on your held-out ground truth**, next to the current pipeline:
 
@@ -436,7 +447,7 @@ The first epochs train only the new head, then the whole network. The best epoch
 python -m multi.validate_angles --backends multiclass --landmark-checkpoint multi/results/models_landmarks/best.pt
 ```
 
-The landmark readings appear as `landmark` (per frame) and `landmark_recon` (after reconstruction). The GUI now uses this ensemble by default (see [Which angle method runs](#which-angle-method-runs)); `DLHOOK_ANGLE_SOURCE=ellipse` restores the ellipse method.
+The landmark readings appear as `landmark` (per frame) and `landmark_recon` (after reconstruction). Several checkpoints joined by `+` are scored as an ensemble.
 
 ## Advanced
 
@@ -446,13 +457,19 @@ The landmark readings appear as `landmark` (per frame) and `landmark_recon` (aft
 
 **Where files go.** Weights are found relative to the repository, so `python <path-to-DLhook>/main.py` works from any directory. The session's scratch files (crops, mask dumps) go to `data/` inside the repository, or to `DLHOOK_DATA_DIR` when that is set; they are wiped at start and exit.
 
+**Running a series without the GUI.** With a boxes file saved from the GUI, `multi/run_series.py` runs the same code as *Start Analysis* and writes the export CSV, a summary, and one figure per seedling (angle, junction–collar distance and collar deviation, with unreadable and flagged frames marked):
+
+```bash
+python -m multi.run_series --images example_data/Plate_1_Old --boxes example_data/Plate_1_Old/crop_boxes.json --out multi/results/series_Plate_1_Old
+```
+
 **Dumping masks.** Masks are kept in memory. To also write them to `data/predict/` as PNGs:
 
 ```bash
 DLHOOK_DUMP_MASKS=1 python main.py
 ```
 
-**Tests.** About 540 tests cover the angle reconstruction, capture-time parsing, germination detection, crop-box layout, segmentation backends and the `multi/` training pipeline. No GPU or image data is needed:
+**Tests.** About 570 tests cover the angle reconstruction, readability gate and time-series checks, capture-time parsing, germination detection, crop-box layout, segmentation backends and the `multi/` training pipeline. No GPU or image data is needed:
 
 ```bash
 pytest
@@ -467,9 +484,11 @@ pytest
 
 DLhook v0.3.0 is a **pre-release**. It is usable and in active development, but the following are known and unresolved:
 
-- **Germination timing is not validated.** Detection thresholds were tuned only on a few seedlings. The detected germination *frame* has never pass a good quality-check. Verify time zero manually for your own material.
+- **Germination timing is not validated.** Detection thresholds were tuned only on a few seedlings. The detected germination *frame* has not passed a proper quality check. Verify time zero manually for your own material.
 - **Super-resolution is opt-in and adds a tiny fraction of detail** (`DLHOOK_SUPERRES=1`, CUDA only). The 4× output is immediately resampled back to native size, so there is nothing extra to zoom into.
-- **Hypocotyl length, curvature and diameter are not validated.** They have not been compared with hand measurements yet. Each frame also costs three landmark networks with flip averaging (six forward passes), which is slow on CPU.
+- **Hypocotyl length, curvature and diameter are not validated.** They have not been compared with hand measurements yet.
+- **The angle is slow on CPU.** Each frame costs three landmark networks with flip averaging (six forward passes).
+- **The time-series thresholds were set on annotated series** (15 px collar jump, 5 px junction drop). Very different magnifications may need other values (`utils/landmark_temporal.py`).
 - **GPU and CPU results are not bit-identical** — roughly 1 pixel in 86,000 (0.001%) can differ.
 
 ---
@@ -486,4 +505,4 @@ The segmentation network architecture and the trained weights derive from [RootP
 
 Please cite this repository while we work on the manuscript describing the method (see also [`CITATION.cff`](CITATION.cff)):
 
-> David Radianu, Adrien Heymans, Siamsa Doyle, Hemamshu Ratnakaram, Stéphanie Robert\*, Sara Raggi\* (2025). DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings. v0.3.0.
+> David Radianu, Sara Raggi, Siamsa Doyle, Hemamshu Ratnakaram, Sandeep Yadav, Stéphanie Robert\*, Adrien Heymans\* (2025). DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings. v0.3.0.

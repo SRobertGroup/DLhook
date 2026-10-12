@@ -111,7 +111,7 @@ from utils.germination_detector import GerminationDetector  # noqa: E402
 ARMS = ("germ_v1", "germ_v2", "multiclass")
 SEED_POINT_MODES = ("bottom-center", "center")
 
-DEFAULT_BOXES_FILE = "crop_boxes.json"
+DEFAULT_BOXES_FILE = "data/crop_boxes/crop_boxes.json"
 DEFAULT_SERIES = "F1_Plate_2_YS"
 DEFAULT_GERM_V1_WEIGHTS = "weights/RootPainter_weights/germ_v1.pkl"
 DEFAULT_GERM_V2_WEIGHTS = "weights/RootPainter_weights/germ_v2.pkl"
@@ -161,7 +161,7 @@ def seed_point_for_box(box, mode):
     space -- see the module docstring's "THE SEED-POINT PROBLEM". Assumes
     the crop is not clamped by the source image's edges, i.e. its actual
     saved size is exactly (2*half_w, 2*half_h) -- true for every box in
-    crop_boxes.json's example series, which sit well inside their plates."""
+    data/crop_boxes/crop_boxes.json's example series, which sit well inside their plates."""
     width, height = 2 * box["half_w"], 2 * box["half_h"]
     if mode == "bottom-center":
         return (width / 2.0, height - 1.0)

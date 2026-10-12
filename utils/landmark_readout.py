@@ -94,7 +94,7 @@ def _unit(dx, dy, min_length):
 
 
 def readout_from_fields(hm, vec, radius=READOUT_RADIUS, peak_threshold=PEAK_FOUND,
-                        collar_hm=None, root_vec=None, base_hm=None, tip_hm=None):
+                        collar_hm=None, root_vec=None, base_hm=None, tip_hm=None, measurable=None):
     """Angle from predicted fields: hm (H, W) probabilities, vec (4, H, W).
 
     `collar_hm` (H, W) and `root_vec` (2, H, W), when given, add the plant collar (its
@@ -109,6 +109,10 @@ def readout_from_fields(hm, vec, radius=READOUT_RADIUS, peak_threshold=PEAK_FOUN
     between junction peaks: of the heatmap's local maxima the one whose distance to the tip is
     plausible (TIP_RANGE) wins, which stops an open hook from being read at a point that slid
     down the hypocotyl.
+
+    `measurable`, from a head with the "measurable" logit, is the crop's probability that an
+    annotator could measure the hook; it is passed through as "measurable_p" and never changes the
+    readout.
 
     Returns None when no junction peak is found or a direction is degenerate,
     else a dict with junction (x, y), theta, bio, the two unit
@@ -154,6 +158,8 @@ def readout_from_fields(hm, vec, radius=READOUT_RADIUS, peak_threshold=PEAK_FOUN
     extra = {}
     if collar_hm is not None and root_vec is not None:
         extra = _collar_readout(collar_hm, root_vec, radius, peak_threshold)
+    if measurable is not None:
+        extra["measurable_p"] = float(measurable)
     return {**extra, "junction": (jx + 0.5, jy + 0.5), "theta": theta,
             "bio": bio_from_theta(theta), "bio_overhook": 180.0 + theta if overhook else bio_from_theta(theta),
             "hypo_dir": dirs[0], "cotyl_dir": dirs[1],

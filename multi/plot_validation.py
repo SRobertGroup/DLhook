@@ -291,7 +291,7 @@ def build_arg_parser():
     p.add_argument("--series-csv", default=str(RESULTS / "new_seedlings" / "angles_v6_tta" / "angle_series.csv"))
     p.add_argument("--repeat", default=str(RESULTS / "repeatability_all" / "pairs.csv"),
                    help="pairs.csv of multi.analyze_repeatability (all rounds; one colour per round)")
-    p.add_argument("--germination", default=str(REPO_ROOT / "germination_new.csv"))
+    p.add_argument("--germination", default=str(REPO_ROOT / "data/annotations/germination/germination_new.csv"))
     p.add_argument("--features", default=str(RESULTS / "germination_validation" / "frame_features_cropped_new_set.csv"))
     p.add_argument("--germination-weights", default=str(REPO_ROOT / "weights" / "germination_detector.json"))
     p.add_argument("--out-dir", default=str(REPO_ROOT / "docs" / "img" / "validation"))

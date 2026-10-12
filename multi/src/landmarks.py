@@ -151,6 +151,36 @@ def load_landmarks(csv_path, exclude_filenames=(), root_csv_path=None):
     return out, report
 
 
+def load_measurable_negatives(csv_path, exclude_filenames=(), tag=None, seedling_groups=None):
+    """Crops an annotator could not measure, the negatives of the "measurable" head:
+    {key: seedling} for rows with status "skipped", or "unmeasurable" in the review sidecar.
+    "rotation" frames are left out (the hook is there, the 2-D angle is not). Keys and seedlings
+    follow the landmark sets: "<tag>/<crop file>" and ("<tag>/<series>", crop_id) with a tag, and a
+    `seedling_groups` map ({"series:crop_id": "[tag/]series:crop_id"}) re-assigns a plant that also
+    appears in another set, exactly as load_extra_landmark_sources does for the measured frames."""
+    from utils.angle_review import UNMEASURABLE
+
+    exclude = set(exclude_filenames)
+    out = {}
+    for row in read_rows(csv_path):
+        if row.get("status") not in ("skipped", UNMEASURABLE):
+            continue
+        name = row.get("crop_file") or ""
+        if not name or name in exclude:
+            continue
+        try:
+            series, crop_id = row["series"], int(row["crop_id"])
+        except (KeyError, ValueError):
+            continue
+        seedling = (f"{tag}/{series}" if tag else series, crop_id)
+        target = (seedling_groups or {}).get(f"{series}:{crop_id}")
+        if target:
+            t_series, _, t_id = target.rpartition(":")
+            seedling = (t_series, int(t_id))
+        out[f"{tag}/{name}" if tag else name] = seedling
+    return out
+
+
 def split_by_seedling(landmarks, val_fraction=0.15, seed=0):
     """(train, val) dicts, split so that all frames of one seedling land on the
     same side -- frames of one seedling are near-duplicates."""

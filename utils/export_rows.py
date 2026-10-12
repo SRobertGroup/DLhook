@@ -1,7 +1,8 @@
 """Row building for the long-format results CSV (one row per seedling per frame) -- pure, no Tk.
 
 The first seven columns are the original schema and keep their order and formatting; the landmark /
-hypocotyl-trait columns (incl. unreadable_p / unreadable, the landmark readability gate) are appended after them, and the millimetre columns only when a scale is set.
+hypocotyl-trait columns (incl. unreadable_p / unreadable / measurable_p, the landmark readability gate, and
+temporal_flag / collar_ref_*, the time-series checks) are appended after them, and the millimetre columns only when a scale is set.
 Missing values are empty cells.
 """
 from __future__ import annotations
@@ -15,10 +16,10 @@ from utils.hypocotyl_traits import to_mm
 BASE_COLUMNS = ['img_name', 'seedling_id', 'raw_angle', 'state', 'bio_angle',
                 'time_elapsed_min', 'germination_frame']
 LANDMARK_COLUMNS = ['angle_source', 'landmark_edit', 'landmark_peak', 'overhook_flag',
-                    'unreadable_p', 'unreadable',
+                    'unreadable_p', 'unreadable', 'measurable_p', 'temporal_flag',
                     'junction_x', 'junction_y', 'hypo_dir_x', 'hypo_dir_y', 'cotyl_dir_x', 'cotyl_dir_y',
                     'cotyl_base_x', 'cotyl_base_y', 'cotyl_tip_x', 'cotyl_tip_y', 'collar_x', 'collar_y',
-                    'root_dir_x', 'root_dir_y']
+                    'collar_ref_x', 'collar_ref_y', 'root_dir_x', 'root_dir_y']
 TRAIT_COLUMNS = ['hypocotyl_length_px', 'hypocotyl_length_truncated', 'hypocotyl_curvature_mean',
                  'hypocotyl_curvature_max', 'hypocotyl_diameter_px']
 MM_COLUMNS = ['hypocotyl_length_mm', 'hypocotyl_diameter_mm',
@@ -28,7 +29,7 @@ MM_COLUMNS = ['hypocotyl_length_mm', 'hypocotyl_diameter_mm',
 _POINT_COLUMNS = [('junction', 'junction_x', 'junction_y'), ('hypo_dir', 'hypo_dir_x', 'hypo_dir_y'),
                   ('cotyl_dir', 'cotyl_dir_x', 'cotyl_dir_y'), ('base', 'cotyl_base_x', 'cotyl_base_y'),
                   ('tip', 'cotyl_tip_x', 'cotyl_tip_y'), ('collar', 'collar_x', 'collar_y'),
-                  ('root_dir', 'root_dir_x', 'root_dir_y')]
+                  ('collar_ref', 'collar_ref_x', 'collar_ref_y'), ('root_dir', 'root_dir_x', 'root_dir_y')]
 
 
 def export_columns(um_per_px=None):
@@ -75,6 +76,8 @@ def build_export_row(filename, seed_id, result, elapsed, germ_frame, um_per_px=N
         row['unreadable_p'] = _cell(readout.get("unreadable_p"))
         gate = readout.get("gated", readout.get("unreadable"))     # "gated": the gate was on and fired
         row['unreadable'] = '' if gate is None else int(bool(gate))
+        row['measurable_p'] = _cell(readout.get("measurable_p"))   # the learned head, when the models have it
+        row['temporal_flag'] = readout.get("temporal_flag") or ''   # utils/landmark_temporal.py (flag only)
         for key, cx, cy in _POINT_COLUMNS:
             pt = readout.get(key)
             if pt is not None and len(pt) >= 2:

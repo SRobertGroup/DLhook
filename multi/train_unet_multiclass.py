@@ -27,8 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.config import load_config, resolved_path
 from src.data_loader import PatchDataset
 from src.landmarks import (angle_balanced_weights, angle_bin, landmark_patch_rows, load_landmarks,
-                           namespace_landmarks, readout_from_fields, split_by_seedling, theta_between)
-from src.loss_functions import align_output_to_target, build_loss, landmark_loss
+                           load_measurable_negatives, namespace_landmarks, readout_from_fields,
+                           split_by_seedling, theta_between)
+from src.loss_functions import align_output_to_target, build_loss, landmark_loss, measurable_loss
 from src.model import build_model
 from models.unet import strip_deprecated_landmark_keys
 
@@ -120,7 +121,8 @@ def compute_class_metrics(confusion: np.ndarray | None) -> dict:
 def run_epoch(model, loader, loss_fn, optimizer, device, desc: str,
               use_amp: bool = False, scaler: torch.amp.GradScaler | None = None,
               grad_clip_norm: float | None = None, num_classes: int | None = None,
-              ignore_index: int = 255, landmark_weights: dict | None = None) -> tuple[float, np.ndarray | None]:
+              ignore_index: int = 255, landmark_weights: dict | None = None,
+              measurable: dict | None = None) -> tuple[float, np.ndarray | None]:
     """Run one training epoch (`optimizer` given) or one validation pass
     (`optimizer=None`).
 
@@ -135,7 +137,9 @@ def run_epoch(model, loader, loss_fn, optimizer, device, desc: str,
     A loader built with landmarks yields (images, masks, targets); with
     `landmark_weights` given, the landmark head's loss (src/loss_functions.py:
     landmark_loss) is added to the segmentation loss. Without it the extra
-    element is ignored and the model's plain forward() is used.
+    element is ignored and the model's plain forward() is used. With `measurable`
+    ({"weight", "pos_weight"}) the image-level "measurable" head's loss (src/loss_functions.py:
+    measurable_loss) is added too.
     """
     is_train = optimizer is not None
     model.train(is_train)
@@ -149,7 +153,10 @@ def run_epoch(model, loader, loss_fn, optimizer, device, desc: str,
             targets = {k: v.to(device) for k, v in extra[0].items()} if extra else None
             use_landmarks = targets is not None and landmark_weights is not None
             with torch.autocast(device_type=device.type, enabled=use_amp):
-                if use_landmarks:
+                measurable_logit = None
+                if use_landmarks and measurable:
+                    outputs, kp_out, measurable_logit = model.forward_with_landmarks(images, return_measurable=True)
+                elif use_landmarks:
                     outputs, kp_out = model.forward_with_landmarks(images)
                 else:
                     outputs = model(images)
@@ -165,6 +172,10 @@ def run_epoch(model, loader, loss_fn, optimizer, device, desc: str,
                     kp_loss, _ = landmark_loss(align_output_to_target(kp_out, masks),
                                                 targets, landmark_weights)
                     loss = loss + kp_loss
+                if measurable_logit is not None:
+                    m_loss, _ = measurable_loss(measurable_logit, targets, float(measurable.get("weight", 1.0)),
+                                                float(measurable.get("pos_weight", 1.0)))
+                    loss = loss + m_loss
             if is_train:
                 optimizer.zero_grad()
                 if scaler is not None:
@@ -335,7 +346,74 @@ def run_wholecrop_landmark_validation(model, landmarks: dict, raw_dir, device, r
     }
 
 
-def load_extra_landmark_sources(config: dict, sources, existing: dict, patch_size: int, stride: int):
+def _auc(labels, scores):
+    """Area under the ROC curve (rank form, ties averaged); NaN with a single class."""
+    labels, scores = np.asarray(labels, bool), np.asarray(scores, float)
+    n_pos, n_neg = int(labels.sum()), int((~labels).sum())
+    if not n_pos or not n_neg:
+        return float("nan")
+    order = scores.argsort(kind="mergesort")
+    ranks = np.empty(len(scores))
+    sorted_scores = scores[order]
+    i = 0
+    while i < len(scores):
+        j = i
+        while j + 1 < len(scores) and sorted_scores[j + 1] == sorted_scores[i]:
+            j += 1
+        ranks[order[i:j + 1]] = (i + j) / 2 + 1
+        i = j + 1
+    return float((ranks[labels].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def measurable_scores(model, items: dict, device, patch_size: int = 252) -> dict:
+    """{name: measurable probability} of whole crops ({name: image path}), read through
+    MulticlassInference's own tiling (tile with the strongest junction peak, flip-averaged) --
+    exactly as the GUI reads it. Crops that cannot be read, or a model without the head, are absent."""
+    import cv2
+    from models.UNetInference import MARGIN
+    from models.multiclass_inference import LandmarkEnsemble, MulticlassInference
+
+    models = list(model) if isinstance(model, (list, tuple)) else [model]
+    for m in models:
+        m.eval()
+    members = [MulticlassInference.from_model(m, device=device, in_size=patch_size + 2 * MARGIN,
+                                              out_size=patch_size, margin=MARGIN) for m in models]
+    inference = members[0] if len(members) == 1 else LandmarkEnsemble(members)
+    names, images = [], []
+    for name in sorted(items):
+        image = cv2.imread(str(items[name]))
+        if image is not None:
+            names.append(name)
+            images.append(image)
+    out = {}
+    for start in range(0, len(images), 16):
+        fields = inference.predict_landmark_fields(images[start:start + 16])
+        for name, (_, _, extra) in zip(names[start:start + 16], fields):
+            if extra and "measurable" in extra:
+                out[name] = float(extra["measurable"])
+    return out
+
+
+def run_measurable_validation(model, positives: dict, negatives: dict, device, patch_size: int = 252,
+                              keep_fraction: float = 0.98) -> dict:
+    """The "measurable" head on WHOLE held-out crops: `positives` / `negatives` are {name: image path}
+    of measured / skipped crops. measurable_auc, and measurable_rejected -- the share of skipped crops
+    rejected at the threshold that keeps `keep_fraction` of the measured ones (the operating point
+    the GUI gate uses)."""
+    scores = measurable_scores(model, {**positives, **negatives}, device, patch_size)
+    pos = [scores[n] for n in positives if n in scores]
+    neg = [scores[n] for n in negatives if n in scores]
+    nan = float("nan")
+    if not pos or not neg:
+        return {"measurable_auc": nan, "measurable_rejected": nan, "measurable_n": len(pos) + len(neg)}
+    threshold = float(np.quantile(pos, 1.0 - keep_fraction))     # keeps this share of measured crops
+    return {"measurable_auc": _auc([1] * len(pos) + [0] * len(neg), pos + neg),
+            "measurable_rejected": float(np.mean(np.asarray(neg) < threshold)),
+            "measurable_n": len(pos) + len(neg)}
+
+
+def load_extra_landmark_sources(config: dict, sources, existing: dict, patch_size: int, stride: int,
+                                negatives: dict | None = None):
     """Landmark-only annotation sets from `landmarks.extra_sources` (a list of {csv, raw_dir,
     root_csv?, tag?}): crops outside the training patch index, e.g. a former test set or
     another crop folder. They are loaded WITHOUT the validation-split guard (listing a set
@@ -344,6 +422,9 @@ def load_extra_landmark_sources(config: dict, sources, existing: dict, patch_siz
     landmark loss sees them. A source may carry `seedling_groups: <json>` ({"series:crop_id":
     "[tag/]series:crop_id"}, written by multi/match_seedlings.py) naming the seedlings it shares
     a plant with in another set, so the held-out split keeps one plant on one side.
+    With `negatives` (a dict, filled in place) each source's skipped crops are loaded too
+    (load_measurable_negatives, same keys and seedling groups) and tiled like the measured ones:
+    the negatives of the "measurable" head.
     Returns (landmarks, raw_paths, patch_rows)."""
     import json
     from dataclasses import replace
@@ -383,9 +464,23 @@ def load_extra_landmark_sources(config: dict, sources, existing: dict, patch_siz
             with Image.open(path) as im:
                 w, h = im.size
             landmarks[key], raw_paths[key], sizes[key] = lm, path, (h, w)
+        n_neg = 0
+        if negatives is not None:
+            groups = (json.loads(resolved_path(holder, "seedling_groups", section="src").read_text(encoding="utf-8"))
+                      if src.get("seedling_groups") else None)
+            for key, seedling in load_measurable_negatives(resolved_path(holder, "csv", section="src"), tag=tag,
+                                                           seedling_groups=groups).items():
+                path = raw_dir / (key.split("/", 1)[1] if tag else key)
+                if key in keyed or key in existing or not path.exists():
+                    continue
+                with Image.open(path) as im:
+                    w, h = im.size
+                negatives[key], raw_paths[key], sizes[key] = seedling, path, (h, w)
+                n_neg += 1
         print(f"Extra landmarks {src['csv']}: {len(keyed) - missing} loaded"
               + (f" as {tag}/..." if tag else "") + (f", {missing} crops missing in {raw_dir}" if missing else "")
-              + (f", {report['with_root']} with collar/root" if "with_root" in report else ""))
+              + (f", {report['with_root']} with collar/root" if "with_root" in report else "")
+              + (f", {n_neg} skipped (measurable negatives)" if negatives is not None else ""))
     return landmarks, raw_paths, landmark_patch_rows(sizes, patch_size, stride, raw_paths)
 
 
@@ -394,6 +489,7 @@ WHOLECROP_COLUMNS = ["wholecrop_theta_mae", "wholecrop_theta_median", "wholecrop
 WHOLECROP_ROOT_COLUMNS = ["wholecrop_collar_px", "wholecrop_root_deg"]
 WHOLECROP_COTYL_COLUMNS = ["wholecrop_tip_px", "wholecrop_base_px", "wholecrop_tip_used"]
 ROOT_COLUMNS = ["collar_px_err", "root_angle_err"]          # only when landmarks.root_csv is set
+MEASURABLE_COLUMNS = ["measurable_auc", "measurable_rejected"]   # only with model.measurable_head
 
 
 def run_training(config: dict, resume: bool = False) -> dict:
@@ -426,11 +522,18 @@ def run_training(config: dict, resume: bool = False) -> dict:
     # Modules trained during the head-only epochs: the landmark head, plus any listed in
     # landmarks.trainable_extra (e.g. ["up4."] to let the last decoder stage adapt while the
     # rest of the backbone stays frozen; segmentation is still guarded by min_mean_fg_dice).
-    head_prefixes = ("conv_kp.", "kp_trunk.") + tuple(lm_cfg.get("trainable_extra") or ())
+    head_prefixes = ("conv_kp.", "kp_trunk.", "cls_measurable.") + tuple(lm_cfg.get("trainable_extra") or ())
+    # landmarks.trainable_only replaces that list: e.g. ["cls_measurable."] trains the measurable head
+    # alone on frozen landmark features, so the angle maps of a warm-started model stay bit-identical.
+    if lm_cfg.get("trainable_only"):
+        head_prefixes = tuple(lm_cfg["trainable_only"])
+    use_measurable = use_landmarks and bool(model_cfg.get("measurable_head"))
+    neg_train, neg_val, neg_paths, measurable_opts = {}, {}, {}, None
     lm_train, lm_val, lm_weights = None, {}, None
     lm_columns = (LANDMARK_COLUMNS + (ROOT_COLUMNS if lm_cfg.get("root_csv") else [])
                   + WHOLECROP_COLUMNS + (WHOLECROP_ROOT_COLUMNS if lm_cfg.get("root_csv") else [])
-                  + (WHOLECROP_COTYL_COLUMNS if model_cfg.get("landmark_cotyl") else []))
+                  + (WHOLECROP_COTYL_COLUMNS if model_cfg.get("landmark_cotyl") else [])
+                  + (MEASURABLE_COLUMNS if use_measurable else []))
     if use_landmarks:
         if not model_cfg.get("landmark_head"):
             raise ValueError("landmarks.enabled requires model.landmark_head: true")
@@ -449,16 +552,38 @@ def run_training(config: dict, resume: bool = False) -> dict:
             raise ValueError("model.landmark_cotyl requires model.landmark_root: true")
         if not all_landmarks:
             raise ValueError("landmarks.enabled but no usable annotated train-split crop was found")
+        negatives = {} if use_measurable else None
         extra_landmarks, lm_raw_paths, lm_extra_rows = load_extra_landmark_sources(
             config, lm_cfg.get("extra_sources"), all_landmarks, int(data_cfg.get("patch_size", 252)),
-            int(data_cfg.get("train_stride", data_cfg.get("patch_size", 252))))
+            int(data_cfg.get("train_stride", data_cfg.get("patch_size", 252))), negatives=negatives)
         all_landmarks = {**all_landmarks, **extra_landmarks}
+        if use_measurable:
+            # The main set's skipped crops are already in the patch index (they carry pseudo-label masks).
+            main_neg = load_measurable_negatives(resolved_path(config, "csv", section="landmarks"),
+                                                 exclude_filenames=val_names)
+            for key, seedling in main_neg.items():
+                if key not in all_landmarks and (raw_dir / key).exists():
+                    negatives[key] = seedling
+                    neg_paths[key] = raw_dir / key
+            neg_paths.update({k: lm_raw_paths[k] for k in negatives if k in lm_raw_paths})
+            negatives = {k: v for k, v in negatives.items() if k not in all_landmarks}
         # split_seed fixes which seedlings are held out, apart from training.seed, so ensemble members
         # trained with different seeds still select their checkpoint on the same plants
         lm_train, lm_val = split_by_seedling(all_landmarks, lm_cfg.get("val_fraction", 0.15),
                                              lm_cfg.get("split_seed", training_cfg.get("seed", 0)))
         lm_weights = lm_cfg.get("loss_weights") or {}
         print(f"Landmark seedling split: {len(lm_train)} train / {len(lm_val)} validation crops")
+        if use_measurable:
+            # Skipped crops follow their seedling: a held-out plant is held out for both heads.
+            val_seedlings = {lm.seedling for lm in lm_val.values()}
+            neg_train = {k: s for k, s in negatives.items() if s not in val_seedlings}
+            neg_val = {k: s for k, s in negatives.items() if s in val_seedlings}
+            pos_weight = lm_weights.get("measurable_pos", "auto")
+            if pos_weight == "auto":       # frame-level class balance of the training split
+                pos_weight = len(neg_train) / max(len(lm_train), 1)
+            measurable_opts = {"weight": float(lm_weights.get("measurable", 1.0)), "pos_weight": float(pos_weight)}
+            print(f"Measurable head: {len(lm_train)} measured / {len(neg_train)} skipped training crops, "
+                  f"{len(lm_val)} / {len(neg_val)} held out; pos_weight {measurable_opts['pos_weight']:.2f}")
 
     train_dataset = PatchDataset(
         patch_index_dir / "train_patches.csv", raw_dir, masks_dir,
@@ -466,7 +591,12 @@ def run_training(config: dict, resume: bool = False) -> dict:
         seed=training_cfg.get("seed", 0),
         raw_ext=raw_ext, binarize_mask=binarize_mask,
         landmarks=lm_train, landmark_cfg=lm_cfg,
-        extra_rows=[r for r in lm_extra_rows if r["filename"] in lm_train] if use_landmarks else None,
+        extra_rows=([r for r in lm_extra_rows if r["filename"] in lm_train or r["filename"] in neg_train]
+                    if use_landmarks else None),
+        measurable_negatives=set(neg_train) if use_measurable else None,
+        # landmarks.labelled_only: train on annotated crops only (measured + skipped), e.g. for a
+        # measurable-head-only run, where unlabelled segmentation tiles teach nothing
+        filenames=(set(lm_train) | set(neg_train)) if (use_landmarks and lm_cfg.get("labelled_only")) else None,
     )
     val_dataset = PatchDataset(
         patch_index_dir / "val_patches.csv", raw_dir, masks_dir, augment=False,
@@ -489,7 +619,8 @@ def run_training(config: dict, resume: bool = False) -> dict:
                               f"{next(balance[n] for n, lm in lm_train.items() if angle_bin(lm.theta) == b):.2f}"
                               for b, label in enumerate(("closed", "middle", "open"))
                               if any(angle_bin(lm.theta) == b for lm in lm_train.values())))
-        sample_weights = [oversample * balance.get(row["filename"], 1.0) if row["filename"] in lm_train else 1.0
+        sample_weights = [oversample * balance.get(row["filename"], 1.0) if row["filename"] in lm_train
+                          else float(lm_cfg.get("negative_weight", 1.0)) if row["filename"] in neg_train else 1.0
                           for row in train_dataset.rows]
         sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_dataset), replacement=True)
         train_loader = DataLoader(train_dataset, batch_size=training_cfg["batch_size"],
@@ -544,15 +675,18 @@ def run_training(config: dict, resume: bool = False) -> dict:
     # stays at or above landmarks.min_mean_fg_dice, so fine-tuning for
     # landmarks cannot quietly wreck the segmentation.
     selection_metric = training_cfg.get("selection_metric", "mean_fg_dice")
-    if selection_metric not in ("mean_fg_dice", "val_loss", "landmark_angle_mae", "wholecrop_theta_mae"):
+    if selection_metric not in ("mean_fg_dice", "val_loss", "landmark_angle_mae", "wholecrop_theta_mae",
+                                "measurable_auc"):
         raise ValueError(
-            "training.selection_metric must be 'mean_fg_dice', 'val_loss', 'landmark_angle_mae' or "
-            "'wholecrop_theta_mae', "
+            "training.selection_metric must be 'mean_fg_dice', 'val_loss', 'landmark_angle_mae', "
+            "'wholecrop_theta_mae' or 'measurable_auc', "
             f"got {selection_metric!r}"
         )
     if selection_metric in ("landmark_angle_mae", "wholecrop_theta_mae") and not use_landmarks:
         raise ValueError(f"selection_metric {selection_metric!r} requires landmarks.enabled")
-    higher_is_better = selection_metric == "mean_fg_dice"
+    if selection_metric == "measurable_auc" and not use_measurable:
+        raise ValueError("selection_metric 'measurable_auc' requires model.measurable_head and landmarks.enabled")
+    higher_is_better = selection_metric in ("mean_fg_dice", "measurable_auc")
     min_fg_dice = float(lm_cfg.get("min_mean_fg_dice", 0.0))
 
     metric_columns = (
@@ -634,7 +768,7 @@ def run_training(config: dict, resume: bool = False) -> dict:
                 for name, param in model.named_parameters():
                     param.requires_grad = (not head_only) or name.startswith(head_prefixes)
 
-            extra_kwargs = {"landmark_weights": lm_weights} if use_landmarks else {}
+            extra_kwargs = {"landmark_weights": lm_weights, "measurable": measurable_opts} if use_landmarks else {}
             train_loss, _ = run_epoch(model, train_loader, loss_fn, optimizer, device,
                                        desc=f"Epoch {epoch} [train]", use_amp=use_amp, scaler=scaler,
                                        grad_clip_norm=grad_clip_norm, **extra_kwargs)
@@ -653,6 +787,11 @@ def run_training(config: dict, resume: bool = False) -> dict:
                         model, lm_val, raw_dir, device, raw_ext=raw_ext, raw_paths=lm_raw_paths,
                         patch_size=int(data_cfg.get("patch_size", 252)),
                         readout_radius=lm_cfg.get("readout_radius", 3.0)))
+                if use_measurable:
+                    positives = {k: (lm_raw_paths.get(k) or raw_dir / (Path(k).stem + raw_ext)) for k in lm_val}
+                    lm_metrics.update(run_measurable_validation(
+                        model, positives, {k: neg_paths[k] for k in neg_val if k in neg_paths}, device,
+                        patch_size=int(data_cfg.get("patch_size", 252))))
                 for key in lm_columns:
                     history[key].append(lm_metrics.get(key, float("nan")))
 
@@ -675,6 +814,9 @@ def run_training(config: dict, resume: bool = False) -> dict:
                 mae = lm_metrics.get(selection_metric, float("nan"))
                 eligible = not math.isnan(mae) and metrics["mean_fg_dice"] >= min_fg_dice
                 current_metric = mae if eligible else float("inf")
+            elif selection_metric == "measurable_auc":
+                auc = lm_metrics.get("measurable_auc", float("nan"))
+                current_metric = auc if not math.isnan(auc) else float("-inf")
             else:
                 current_metric = metrics["mean_fg_dice"] if higher_is_better else val_loss
             improved = current_metric > best_metric if higher_is_better else current_metric < best_metric
@@ -714,6 +856,9 @@ def run_training(config: dict, resume: bool = False) -> dict:
                 if "collar_px_err" in lm_columns:
                     lm_text += (f" collar_px_err={lm_metrics['collar_px_err']:.1f}"
                                 f" root_angle_err={lm_metrics['root_angle_err']:.1f}")
+                if "measurable_auc" in lm_metrics:
+                    lm_text += (f" | measurable AUC={lm_metrics['measurable_auc']:.3f}"
+                                f" rejected@98%={lm_metrics['measurable_rejected']:.2f}")
             print(f"Epoch {epoch}: lr={lr:.2e} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
                   f"mean_fg_dice={metrics['mean_fg_dice']:.4f}{lm_text}{marker} [{elapsed_min:.1f} min]")
 

@@ -9,7 +9,7 @@ smaller box in the same series.
 
     python -m multi.match_seedlings --new data/crops/cropped_open_set/manifest.csv \
         --ref data/crops/cropped_training_set/manifest.csv --ref new=data/crops/cropped_new_set/manifest.csv \
-        --out open_seedling_groups.json
+        --out data/annotations/seedling_groups/seedling_groups_open.json
 
 `--ref [TAG=]MANIFEST` is repeatable; TAG is the `tag:` the reference gets under
 `landmarks.extra_sources` (empty for the main training set). The output maps each matched new

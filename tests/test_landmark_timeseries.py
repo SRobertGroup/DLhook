@@ -36,3 +36,50 @@ def test_hampel_and_smoothing_are_off_by_default_but_available():
 def test_empty_and_all_missing():
     assert reconstruct_landmark_series([]) == []
     assert all(math.isnan(v) for v in reconstruct_landmark_series([None, None]))
+
+
+# ---- robust reconstruction (the GUI's) ------------------------------------------------------------
+from utils.landmark_timeseries import reconstruct_landmark_series_detail as robust  # noqa: E402
+
+
+def _bio(values):
+    return [None if v is None else {"theta": 180.0 - v, "peak": 0.9} for v in values]
+
+
+def test_robust_rejects_a_spike_and_a_short_dive():
+    series = [170.0] * 8 + [20.0] * 3 + [168.0] * 8 + [40.0] + [166.0] * 6
+    bio, edits = robust(_bio(series))
+    assert all(abs(b - 168) < 4 for b in bio)                       # dive and spike gone, gaps filled
+    assert edits[8:11] == ["rejected"] * 3 and edits[19] == "rejected"
+
+
+def test_robust_keeps_a_real_step_and_reclosing():
+    step = [170.0] * 10 + [80.0] * 10
+    bio, edits = robust(_bio(step))
+    assert bio[:10] == [170.0] * 10 and bio[10:] == [80.0] * 10 and not any(edits)
+    reclose = [170.0] * 6 + [120.0] * 6 + [40.0] * 6 + [90.0] * 6      # opens, then closes again
+    bio, _ = robust(_bio(reclose))
+    assert bio[-1] == 90.0 and min(bio) == 40.0
+
+
+def test_robust_never_changes_manual_frames_and_uses_them_as_anchors():
+    rs = _bio([170.0] * 5 + [30.0] + [170.0] * 5)
+    rs[5]["manual"] = True                                           # a Manual 30 deg stays
+    bio, edits = robust(rs)
+    assert bio[5] == 30.0 and edits[5] == ""
+
+
+def test_robust_gated_frames_block_interpolation_and_none_method_is_the_plain_one():
+    rs = _bio([150.0, 150.0, 150.0]) + [{"theta": None, "gated": True}] + _bio([150.0, 150.0, 150.0])
+    bio, edits = robust(rs)
+    assert math.isnan(bio[3]) and edits[3] == ""
+    plain = [ro(30), None, ro(32), ro(120), ro(34)]
+    assert robust(plain, method="none")[0] == reconstruct_landmark_series(plain)
+    assert robust(plain, method="none")[1][1] == "interpolated"
+
+
+def test_robust_islands_when_enabled():
+    rs = _bio([150.0] * 5 + [None] * 8 + [100.0] + [None] * 8)
+    bio, edits = robust(rs, island_max=2)
+    assert edits[13] == "island" and math.isnan(bio[13])
+    assert robust(rs)[1][13] != "island"                             # the rule is off by default

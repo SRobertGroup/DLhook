@@ -49,10 +49,27 @@ def main() -> None:
         min_foreground_fraction=data_cfg["min_foreground_fraction"],
         background_keep_ratio=data_cfg["background_keep_ratio"],
         annotations_dirs=annotations_dirs,
+        groups=_groups(config, data_cfg),
     )
 
     print(f"Train patches: {n_train}")
     print(f"Val patches:   {n_val}")
+
+
+def _groups(config, data_cfg):
+    """data.split_level: "image" (default, one crop file each) or "seedling" (every frame of a plant
+    on one side, from <raw_data_dir>/manifest.csv)."""
+    level = data_cfg.get("split_level", "image")
+    if level == "image":
+        return None
+    if level != "seedling":
+        raise ValueError(f"data.split_level must be 'image' or 'seedling', not {level!r}")
+    from src.patch_index import seedling_groups
+    manifest = resolved_path(config, "raw_data_dir") / "manifest.csv"
+    groups = seedling_groups(str(manifest))
+    if not groups:
+        raise FileNotFoundError(f"split_level: seedling needs {manifest}")
+    return groups
 
 
 if __name__ == "__main__":

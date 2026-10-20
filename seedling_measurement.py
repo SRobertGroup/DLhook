@@ -20,7 +20,7 @@ from utils.apicalhook_angle import ApicalHook
 from utils.angle_timeseries import (reconstruct_series, sync_angle_and_state_lists, classify_states,
                                     UNREADABLE_STATE)
 from utils.landmark_gate import gate_enabled
-from utils.landmark_timeseries import reconstruct_landmark_series
+from utils.landmark_timeseries import reconstruct_landmark_series_detail
 from utils.landmark_temporal import temporal_flags
 from utils.hypocotyl_traits import hypocotyl_traits
 from utils.clean_on_exit import RemoveData
@@ -534,6 +534,12 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
 
             # Update progress bar (0–30%)
             self.progress_reporter.report(value=(image_n / n_images) * 30)
+            if img_x is None:
+                # A corrupt or unreadable file: no crops. Its frames stay in the series as "no reading"
+                # (_segment_paths records a None readout for a crop it could not read), so the frame
+                # indices of every seedling still match file_list.
+                log.warning(f"Cannot read {image}; its frame has no reading")
+                continue
 
             # Apply preprocessing (e.g., filtering, contrast)
             img_x = preprocess_init.preprocess(img_x)
@@ -583,6 +589,9 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
                 store.update(get_landmark_runner().predict_paths(paths))
             except Exception as exc:
                 log.warning(f"Landmark readout failed ({exc}); using the ellipse angle source for these frames")
+            else:
+                for path in paths:      # an unreadable crop: no reading (a NaN frame, not a dropped one)
+                    store.setdefault(os.path.basename(path), None)
 
     def run_apical_pipeline(self):
         image_crops_angles = {}
@@ -855,7 +864,10 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
         Input comes from raw_angle_dict (captured from result["landmarks"] on first sight), never
         from the already-reconstructed angle_dict. Manual frames keep their stored bio value; those
         at or below 180 also feed the series as an anchor reading (theta = 180 - bio) so neighbouring
-        gaps interpolate against them. States come from classify_states."""
+        gaps interpolate against them. The robust reconstruction (utils/landmark_timeseries) rejects
+        readings far from their neighbours and smooths the rest; Manual frames are never changed and
+        anchor it. Each landmark readout gets "series_edit" ("" / "rejected" / "interpolated"), re-derived
+        on every call. States come from classify_states."""
         readouts = []
         is_manual = []
         manual_bio = []
@@ -873,7 +885,7 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
                 bio = result["angle_dict"].get(seed_id)
                 manual_bio.append(bio)
                 ok = isinstance(bio, (int, float)) and not np.isnan(bio) and bio <= 180.0
-                readouts.append({"theta": 180.0 - bio, "peak": 1.0} if ok else None)
+                readouts.append({"theta": 180.0 - bio, "peak": 1.0, "manual": True} if ok else None)
                 continue
             manual_bio.append(None)
             raw_dict = result.setdefault("raw_angle_dict", {})
@@ -895,12 +907,17 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
             raw = raw_dict[seed_id]
             if isinstance(raw, (int, float)) and not np.isnan(raw):
                 peak = readout.get("peak", 1.0) if (readout and from_landmarks) else 1.0
-                readouts.append({"theta": float(raw), "peak": peak})
+                mp = readout.get("measurable_p") if (readout and from_landmarks) else None
+                readouts.append({"theta": float(raw), "peak": peak, "measurable_p": mp})
             else:
                 readouts.append(None)
 
-        bio = reconstruct_landmark_series(readouts)
+        bio, edits = reconstruct_landmark_series_detail(readouts)
         bio = [manual_bio[i] if is_manual[i] else v for i, v in enumerate(bio)]
+        for result, edit, manual in zip(frame_results, edits, is_manual):
+            readout = (result.get("landmarks") or {}).get(seed_id) if result else None
+            if readout:
+                readout["series_edit"] = "" if manual else edit
         states = classify_states(bio, is_manual)
         self._flag_landmark_series(frame_results, seed_id, is_manual, gated)
 
@@ -1105,7 +1122,8 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
 
     def _trait_mask(self, file_name, fallback=None):
         """The mask the hypocotyl traits are measured on: the binary hypocot_v5 mask when the backend
-        ran it ("hypocotyl_binary"), else label "2", else `fallback`. Shared by the pipeline and the
+        ran it ("hypocotyl_binary", off by default since the v2 four-class model), else label "2" (the
+        multiclass hypocotyl, which reaches the junction), else `fallback`. Shared by the pipeline and the
         analysis window's landmark edits."""
         mask = self.mask_store.get(file_name, HYPOCOTYL_BINARY_LABEL)
         if mask is None:

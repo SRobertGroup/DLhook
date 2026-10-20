@@ -1,6 +1,6 @@
 """Turn the analysis window's "Save edits for retraining" records into landmark training data.
 
-    python -m multi.edits_to_csv <edits_dir> --out-prefix angle_edits [--crop-dir cropped_edits]
+    python -m multi.edits_to_csv <edits_dir> --out-prefix data/annotations/angles/angle_edits [--crop-dir data/crops/cropped_edits]
 
 reads every record in <edits_dir> (utils/landmark_edits.write_edit) and writes
 

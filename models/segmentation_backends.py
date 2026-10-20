@@ -1,7 +1,7 @@
 """Which segmentation models actually run underneath the GUI pipeline.
 
-The default is now the 4-class MulticlassBackend (labels "1", "2", plus a
-binary hypocot_v5 mask under "hypocotyl_binary"); the legacy path
+The default is now the 4-class MulticlassBackend (labels "1", "2"; v2 checkpoint,
+v1 when v2 is missing; its "2" is also the hypocotyl trait mask); the legacy path
 (DLHOOK_SEG_BACKEND=binary) is three independent binary RootPainter
 checkpoints -- cotyledon_v5.pkl,
 hypocot_v5.pkl, germ_v1.pkl, feeding labels "1", "2", "4" respectively. That
@@ -44,17 +44,33 @@ VALID_BACKENDS = ("binary", "multiclass")
 # name one explicitly. A groupnorm-head UNetGNRes trained at
 # data.patch_size: 252 (see MulticlassBackend's docstring for why that
 # geometry, not the GUI's default 572, is what this checkpoint needs).
-DEFAULT_MULTICLASS_CHECKPOINT = "weights/multiclass/dlhook_4class_v1.pt"
+# v2 (multi/configs/training_config_v2.yaml): v1 warm start retrained on every crop folder with
+# human strokes on the hook region (ui/seg_annotator.py); its hypocotyl reaches the junction, so it
+# also feeds the traits. v1 stays on disk: the learned germination detector was fitted on it.
+DEFAULT_MULTICLASS_CHECKPOINT = "weights/multiclass/dlhook_4class_v2.pt"
+PREVIOUS_MULTICLASS_CHECKPOINT = "weights/multiclass/dlhook_4class_v1.pt"
 
 # Class index -> mask store label. Class 0 (background) is intentionally
 # absent: MaskStore only ever holds foreground labels, and nothing downstream
 # reads a "background" label.
 _CLASS_TO_LABEL = {1: "1", 2: "2", 3: "4"}
 
-# Mask-store label for the binary hypocot_v5 mask that MulticlassBackend writes
-# beside its own "2" (the multiclass hypocotyl is cut in half; hypocotyl traits
-# read this one).
+# Mask-store label for the binary hypocot_v5 mask MulticlassBackend writes beside its own "2"
+# only with hypocotyl_binary=True (off by default since v2: the binary mask misses the hook region,
+# so the traits read "2"; Gui._trait_mask still prefers this label when present).
 HYPOCOTYL_BINARY_LABEL = "hypocotyl_binary"
+
+
+def default_multiclass_checkpoint() -> str:
+    """DEFAULT_MULTICLASS_CHECKPOINT when it is on disk, else PREVIOUS_MULTICLASS_CHECKPOINT (with a
+    warning) when that one is; else DEFAULT_MULTICLASS_CHECKPOINT (missing: the caller decides)."""
+    if os.path.exists(repo_path(DEFAULT_MULTICLASS_CHECKPOINT)):
+        return DEFAULT_MULTICLASS_CHECKPOINT
+    if os.path.exists(repo_path(PREVIOUS_MULTICLASS_CHECKPOINT)):
+        _warn_once("seg-checkpoint", f"{DEFAULT_MULTICLASS_CHECKPOINT} not found; using "
+                                     f"{PREVIOUS_MULTICLASS_CHECKPOINT}.")
+        return PREVIOUS_MULTICLASS_CHECKPOINT
+    return DEFAULT_MULTICLASS_CHECKPOINT
 
 
 def resolve_backend_name() -> str:
@@ -75,11 +91,11 @@ def resolve_backend_name() -> str:
             f"{ENV_VAR}={name!r} is not a valid segmentation backend "
             f"(expected one of {VALID_BACKENDS})"
         )
-    if explicit is None and name == "multiclass" and not os.path.exists(repo_path(DEFAULT_MULTICLASS_CHECKPOINT)):
+    if explicit is None and name == "multiclass" and not os.path.exists(repo_path(default_multiclass_checkpoint())):
         _warn_once(
             "seg-backend",
-            f"Default multiclass checkpoint {DEFAULT_MULTICLASS_CHECKPOINT} not found; "
-            f"falling back to the legacy binary segmentation models.",
+            f"Multiclass checkpoints {DEFAULT_MULTICLASS_CHECKPOINT} / {PREVIOUS_MULTICLASS_CHECKPOINT} "
+            f"not found; falling back to the legacy binary segmentation models.",
         )
         return "binary"
     return name
@@ -145,8 +161,8 @@ class MulticlassBackend:
     This is the default backend (DEFAULT_BACKEND). It writes "1"/"2" from the
     argmax; label "4" depends on `radicle_source` ("none" by default: germination
     comes from the learned detector, so no radicle mask is stored; "multiclass"
-    stores argmax class 3 under "4"). With `hypocotyl_binary` (default True) it
-    also runs the binary hypocot_v5 model into HYPOCOTYL_BINARY_LABEL.
+    stores argmax class 3 under "4"). With `hypocotyl_binary` (default False since v2)
+    it also runs the binary hypocot_v5 model into HYPOCOTYL_BINARY_LABEL.
 
     Geometry is pinned to the checkpoint's own training patch size, NOT the
     GUI's default 572/560/6 (UNetInference.IN_SIZE/OUT_SIZE/MARGIN): the
@@ -167,14 +183,14 @@ class MulticlassBackend:
     RADICLE_SOURCES = ("none", "multiclass")
 
     def __init__(self, checkpoint=None, *, in_size=None, out_size=None, num_classes=None,
-                 radicle_source="none", hypocotyl_binary=True):
+                 radicle_source="none", hypocotyl_binary=False):
         if radicle_source not in self.RADICLE_SOURCES:
             raise ValueError(
                 f"radicle_source={radicle_source!r} is not valid (expected one of {self.RADICLE_SOURCES})"
             )
         self.radicle_source = radicle_source
         self.hypocotyl_binary = bool(hypocotyl_binary)
-        self.checkpoint = checkpoint or DEFAULT_MULTICLASS_CHECKPOINT
+        self.checkpoint = checkpoint or default_multiclass_checkpoint()
         self.out_size = out_size if out_size is not None else 252
         self.in_size = in_size if in_size is not None else self.out_size + 2 * MARGIN
         self.margin = MARGIN
@@ -262,7 +278,7 @@ _BACKEND_CACHE = {}
 
 
 def get_backend(name=None, *, checkpoint=None, in_size=None, out_size=None, num_classes=None,
-                radicle_source="none", hypocotyl_binary=True):
+                radicle_source="none", hypocotyl_binary=False):
     """Return a process-cached backend instance for `name` (defaulting to
     `resolve_backend_name()`), constructing it only on first request for
     this exact `(name, checkpoint, in_size, out_size, num_classes,
@@ -321,7 +337,7 @@ def resolve_germination_method(weights_path=DEFAULT_GERMINATION_WEIGHTS) -> str:
             return "rule"
         try:
             from utils.germination_learned import GerminationModel
-            checkpoint = GerminationModel.load(weights_path).checkpoint or DEFAULT_MULTICLASS_CHECKPOINT
+            checkpoint = GerminationModel.load(weights_path).checkpoint or PREVIOUS_MULTICLASS_CHECKPOINT
         except (OSError, ValueError, KeyError):
             return "rule"
         if not os.path.exists(repo_path(checkpoint)):
@@ -340,7 +356,7 @@ class LearnedGerminationRunner:
 
         self.weights_path = weights_path
         self.model = GerminationModel.load(weights_path)
-        checkpoint = self.model.checkpoint or DEFAULT_MULTICLASS_CHECKPOINT
+        checkpoint = self.model.checkpoint or PREVIOUS_MULTICLASS_CHECKPOINT   # fitted on v1
         out_size = 252                       # the training geometry, as MulticlassBackend
         self.inference = MulticlassInference(checkpoint, num_classes=4, in_size=out_size + 2 * MARGIN,
                                              out_size=out_size, margin=MARGIN)
@@ -399,8 +415,18 @@ def get_germination_runner(weights_path=DEFAULT_GERMINATION_WEIGHTS):
 ANGLE_SOURCE_ENV = "DLHOOK_ANGLE_SOURCE"
 DEFAULT_ANGLE_SOURCE = "landmarks"
 VALID_ANGLE_SOURCES = ("landmarks", "ellipse")
-# "+"-joined spec, the syntax LandmarkEnsemble.from_checkpoints takes.
+# "+"-joined spec, the syntax LandmarkEnsemble.from_checkpoints takes. The default members carry the
+# learned "measurable" head (audit M-10; multi/configs/training_landmarks_all_{a,b,c}_mt.yaml): on
+# BerryBox v2 they gate 76% of the skipped frames at 99% of the measured kept, and the angle error is
+# 13.5 deg against 13.9 for the previous members (multi/results/measurable_validation_mt.json,
+# angle_validation_bbval_*). A machine holding only the previous members uses those, with the
+# logistic gate (default_landmark_checkpoints).
 DEFAULT_LANDMARK_CHECKPOINTS = (
+    "weights/landmarks/dlhook_landmarks_m_a.pt"
+    "+weights/landmarks/dlhook_landmarks_m_b.pt"
+    "+weights/landmarks/dlhook_landmarks_m_c.pt"
+)
+PREVIOUS_LANDMARK_CHECKPOINTS = (
     "weights/landmarks/dlhook_landmarks_a.pt"
     "+weights/landmarks/dlhook_landmarks_b.pt"
     "+weights/landmarks/dlhook_landmarks_c.pt"
@@ -411,9 +437,29 @@ def _checkpoint_paths(spec):
     return [p.strip() for p in spec.split("+") if p.strip()]
 
 
-def resolve_angle_source(checkpoints=DEFAULT_LANDMARK_CHECKPOINTS) -> str:
+def _all_exist(spec):
+    return all(os.path.exists(repo_path(p)) for p in _checkpoint_paths(spec))
+
+
+def default_landmark_checkpoints():
+    """DEFAULT_LANDMARK_CHECKPOINTS when all its files exist, else PREVIOUS_LANDMARK_CHECKPOINTS when
+    all of those do (with a warning), else DEFAULT (resolve_angle_source then falls back to ellipse)."""
+    if not _all_exist(DEFAULT_LANDMARK_CHECKPOINTS) and _all_exist(PREVIOUS_LANDMARK_CHECKPOINTS):
+        _warn_once(
+            "landmark-previous",
+            "Landmark checkpoints with the measurable head not found "
+            f"({DEFAULT_LANDMARK_CHECKPOINTS}); using the previous members with the logistic gate.",
+        )
+        return PREVIOUS_LANDMARK_CHECKPOINTS
+    return DEFAULT_LANDMARK_CHECKPOINTS
+
+
+def resolve_angle_source(checkpoints=None) -> str:
     """'landmarks' or 'ellipse': the DLHOOK_ANGLE_SOURCE env var if set (must be valid), else the
-    default -- downgraded to 'ellipse' (with a warning) when any checkpoint of the spec is missing."""
+    default -- downgraded to 'ellipse' (with a warning) when any checkpoint of the spec is missing.
+    `checkpoints` None: default_landmark_checkpoints()."""
+    if checkpoints is None:
+        checkpoints = default_landmark_checkpoints()
     name = os.environ.get(ANGLE_SOURCE_ENV, DEFAULT_ANGLE_SOURCE)
     if name not in VALID_ANGLE_SOURCES:
         raise ValueError(f"{ANGLE_SOURCE_ENV}={name!r} is not valid (expected one of {VALID_ANGLE_SOURCES})")
@@ -466,8 +512,11 @@ class LandmarkRunner:
 _LANDMARK_CACHE = {}
 
 
-def get_landmark_runner(checkpoints=DEFAULT_LANDMARK_CHECKPOINTS):
-    """Process-cached LandmarkRunner (the ensemble loads once, on first predict_paths)."""
+def get_landmark_runner(checkpoints=None):
+    """Process-cached LandmarkRunner (the ensemble loads once, on first predict_paths).
+    `checkpoints` None: default_landmark_checkpoints()."""
+    if checkpoints is None:
+        checkpoints = default_landmark_checkpoints()
     runner = _LANDMARK_CACHE.get(checkpoints)
     if runner is None:
         runner = _LANDMARK_CACHE[checkpoints] = LandmarkRunner(checkpoints)

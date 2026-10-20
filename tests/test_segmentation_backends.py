@@ -84,10 +84,33 @@ def test_resolve_backend_name_defaults_to_multiclass_when_checkpoint_exists(monk
 
 def test_resolve_backend_name_default_falls_back_to_binary_with_warning(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(segmentation_backends, "DEFAULT_MULTICLASS_CHECKPOINT", str(tmp_path / "missing.pt"))
+    monkeypatch.setattr(segmentation_backends, "PREVIOUS_MULTICLASS_CHECKPOINT", str(tmp_path / "missing_v1.pt"))
     monkeypatch.setattr(segmentation_backends, "_WARNED", set())
     monkeypatch.delenv(ENV_VAR, raising=False)
     assert resolve_backend_name() == "binary"
     assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_default_multiclass_checkpoint_falls_back_to_v1(monkeypatch, tmp_path, caplog):
+    v1 = tmp_path / "dlhook_4class_v1.pt"
+    v1.write_bytes(b"x")
+    monkeypatch.setattr(segmentation_backends, "DEFAULT_MULTICLASS_CHECKPOINT", str(tmp_path / "missing_v2.pt"))
+    monkeypatch.setattr(segmentation_backends, "PREVIOUS_MULTICLASS_CHECKPOINT", str(v1))
+    monkeypatch.setattr(segmentation_backends, "_WARNED", set())
+    monkeypatch.delenv(ENV_VAR, raising=False)
+    assert segmentation_backends.default_multiclass_checkpoint() == str(v1)
+    assert resolve_backend_name() == "multiclass"
+    assert MulticlassBackend().checkpoint == str(v1)
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_default_multiclass_checkpoint_is_v2_and_germination_keeps_v1():
+    assert segmentation_backends.DEFAULT_MULTICLASS_CHECKPOINT.endswith("dlhook_4class_v2.pt")
+    assert segmentation_backends.PREVIOUS_MULTICLASS_CHECKPOINT.endswith("dlhook_4class_v1.pt")
+    import json
+    from utils.paths import repo_path
+    with open(repo_path(segmentation_backends.DEFAULT_GERMINATION_WEIGHTS), encoding="utf-8") as fh:
+        assert json.load(fh)["checkpoint"] == segmentation_backends.PREVIOUS_MULTICLASS_CHECKPOINT
 
 
 def test_resolve_backend_name_explicit_multiclass_not_downgraded(monkeypatch, tmp_path):
@@ -290,12 +313,12 @@ def test_get_backend_cache_key_includes_new_options():
     segmentation_backends._BACKEND_CACHE.clear()
     a = get_backend("multiclass")
     b = get_backend("multiclass", radicle_source="multiclass")
-    c = get_backend("multiclass", hypocotyl_binary=False)
+    c = get_backend("multiclass", hypocotyl_binary=True)
     assert a is get_backend("multiclass")
     assert len({id(a), id(b), id(c)}) == 3
 
 
-def test_multiclass_default_writes_1_2_hypocotyl_binary_and_no_4(monkeypatch):
+def test_multiclass_hypocotyl_binary_on_writes_1_2_hypocotyl_binary_and_no_4(monkeypatch):
     monkeypatch.setattr("models.multiclass_inference.MulticlassInference", _FakeMulticlassInference)
     label_map = np.array([[0, 1, 2, 3], [3, 2, 1, 0]], dtype=np.uint8)
     _FakeMulticlassInference.label_maps_to_return = {"frame.png": label_map}
@@ -309,7 +332,7 @@ def test_multiclass_default_writes_1_2_hypocotyl_binary_and_no_4(monkeypatch):
     monkeypatch.setattr(segmentation_backends, "get_predictor", fake_get_predictor)
 
     mask_store = _RecordingMaskStore()
-    MulticlassBackend().predict_into(mask_store, ["frame.png"])
+    MulticlassBackend(hypocotyl_binary=True).predict_into(mask_store, ["frame.png"])
 
     hypocot = dict(BinaryBackend.WEIGHTS)["2"]
     assert [call[1] for call in mask_store.put_raw_bulk_calls] == ["1", "2", "hypocotyl_binary"]
@@ -318,7 +341,7 @@ def test_multiclass_default_writes_1_2_hypocotyl_binary_and_no_4(monkeypatch):
     assert mask_store.put_raw_bulk_calls[2][0] == {"frame.png": "mask-for-2"}
 
 
-def test_multiclass_hypocotyl_binary_off_skips_binary_model(monkeypatch):
+def test_multiclass_default_skips_binary_model(monkeypatch):
     monkeypatch.setattr("models.multiclass_inference.MulticlassInference", _FakeMulticlassInference)
     _FakeMulticlassInference.label_maps_to_return = {"frame.png": np.zeros((2, 2), dtype=np.uint8)}
 
@@ -327,7 +350,7 @@ def test_multiclass_hypocotyl_binary_off_skips_binary_model(monkeypatch):
 
     monkeypatch.setattr(segmentation_backends, "get_predictor", boom)
     mask_store = _RecordingMaskStore()
-    MulticlassBackend(hypocotyl_binary=False).predict_into(mask_store, ["frame.png"])
+    MulticlassBackend().predict_into(mask_store, ["frame.png"])
     assert [call[1] for call in mask_store.put_raw_bulk_calls] == ["1", "2"]
 
 
@@ -352,8 +375,23 @@ def test_angle_source_constants():
     assert segmentation_backends.DEFAULT_ANGLE_SOURCE == "landmarks"
     assert segmentation_backends.VALID_ANGLE_SOURCES == ("landmarks", "ellipse")
     assert segmentation_backends.DEFAULT_LANDMARK_CHECKPOINTS.split("+") == [
+        f"weights/landmarks/dlhook_landmarks_m_{c}.pt" for c in "abc"
+    ]
+    assert segmentation_backends.PREVIOUS_LANDMARK_CHECKPOINTS.split("+") == [
         f"weights/landmarks/dlhook_landmarks_{c}.pt" for c in "abc"
     ]
+
+
+def test_default_checkpoints_fall_back_to_the_previous_members(monkeypatch):
+    sb = segmentation_backends
+    have = set()
+    monkeypatch.setattr(sb, "_all_exist", lambda spec: spec in have)
+    monkeypatch.setattr(sb, "_warn_once", lambda *a: None)
+    assert sb.default_landmark_checkpoints() == sb.DEFAULT_LANDMARK_CHECKPOINTS      # nothing: ellipse later
+    have.add(sb.PREVIOUS_LANDMARK_CHECKPOINTS)
+    assert sb.default_landmark_checkpoints() == sb.PREVIOUS_LANDMARK_CHECKPOINTS     # only the old members
+    have.add(sb.DEFAULT_LANDMARK_CHECKPOINTS)
+    assert sb.default_landmark_checkpoints() == sb.DEFAULT_LANDMARK_CHECKPOINTS      # both: the new ones
 
 
 def test_resolve_angle_source_default_is_landmarks(monkeypatch, tmp_path):

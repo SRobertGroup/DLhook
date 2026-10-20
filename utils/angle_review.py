@@ -104,13 +104,16 @@ def _items(rows, folder):
             for r in rows if os.path.exists(os.path.join(folder, r["crop_file"]))]
 
 
-def disagreement_queue(csv_path, folder, errors=None):
+def disagreement_queue(csv_path, folder, errors=None, only_errors=False):
     """Measured frames of `csv_path` (sidecar applied), the ones the model disagrees with most first.
 
     `errors` is {crop_file: angle error in degrees} (multi.validate_landmarks --per-crop-out). Frames
-    without an error come last, the most open hooks (largest theta) first, since those fail most."""
+    without an error come last, the most open hooks (largest theta) first, since those fail most;
+    with `only_errors` they are left out (a review limited to a list of suspect frames)."""
     rows = [r for r in read_rows(csv_path) if r["status"] == "measured"]
     errors = errors or {}
+    if only_errors:
+        rows = [r for r in rows if r["crop_file"] in errors]
     rows.sort(key=lambda r: (r["crop_file"] not in errors, -errors.get(r["crop_file"], 0.0),
                              -float(r["theta"] or 0), r.get("series", ""), int(r["crop_id"]),
                              _natural_key(r["frame"])))

@@ -27,10 +27,10 @@ always included regardless of stride, since that is the frame --boxes-file's
 geometry was drawn on.
 
 Usage:
-    python multi/recrop_plates.py --boxes-file my_boxes.json --dry-run
-    python multi/recrop_plates.py --boxes-file my_boxes.json --series F1_Plate_2_YS,HR_Plate_5
-    python multi/recrop_plates.py --boxes-file my_boxes.json --output-dir training_dataset/dlhook_recrop
-    python multi/recrop_plates.py --boxes-file my_boxes.json --every-n 1   # every frame, no sampling
+    python multi/recrop_plates.py --boxes-file data/crop_boxes/crop_boxes.json --dry-run
+    python multi/recrop_plates.py --boxes-file data/crop_boxes/crop_boxes.json --series F1_Plate_2_YS,HR_Plate_5
+    python multi/recrop_plates.py --boxes-file data/crop_boxes/crop_boxes.json --output-dir data/crops/cropped_training_set
+    python multi/recrop_plates.py --boxes-file data/crop_boxes/crop_boxes.json --every-n 1   # every frame, no sampling
 
 See `--help` for the remaining flags.
 """
@@ -386,12 +386,12 @@ def build_arg_parser():
     parser.add_argument("--input-dir", default=None,
                          help="Directory of plate series subfolders (default: <repo>/example_data)")
     parser.add_argument("--output-dir", default=None,
-                         help="Output directory for new crops (default: <repo>/training_dataset/dlhook_recrop). "
+                         help="Output directory for new crops (default: <repo>/data/crops/cropped_recrop). "
                               "Never training_dataset/dlhook itself -- refused outright.")
     parser.add_argument("--manifest-path", default=None,
                          help="Manifest CSV path (default: <output-dir>/manifest.csv)")
     parser.add_argument("--series", default=None,
-                         help="Comma-separated series (subfolder) names to restrict to (default: all)")
+                         help="Comma-separated series (subfolder) names to restrict to (default: every series the boxes file covers; the others are listed and skipped)")
     parser.add_argument("--boxes-file", default=None,
                          help="Required. JSON {series: [{cx,cy,half_w,half_h}, ...]} giving crop boxes per "
                               "series -- the only way to supply crop geometry now that automatic detection "
@@ -415,7 +415,7 @@ def main(argv=None):
     args = build_arg_parser().parse_args(argv)
 
     input_dir = Path(args.input_dir) if args.input_dir else _REPO_ROOT / "example_data"
-    output_dir = Path(args.output_dir) if args.output_dir else _REPO_ROOT / "training_dataset" / "dlhook_recrop"
+    output_dir = Path(args.output_dir) if args.output_dir else _REPO_ROOT / "data" / "crops" / "cropped_recrop"
     manifest_path = Path(args.manifest_path) if args.manifest_path else output_dir / "manifest.csv"
 
     if output_dir.resolve() == PROTECTED_DIR:
@@ -450,6 +450,14 @@ def main(argv=None):
         return 1
 
     missing = sorted(name for name in series_dirs if name not in boxes_map)
+    if missing and only is None:
+        # no --series: crop what the boxes file covers (a new round usually boxes a few plates only)
+        print(f"Skipping {len(missing)} series with no boxes in --boxes-file: " + ", ".join(missing))
+        series_dirs = {name: path for name, path in series_dirs.items() if name in boxes_map}
+        missing = []
+        if not series_dirs:
+            print(f"None of the series in {args.boxes_file} is under {input_dir}")
+            return 1
     if missing:
         print(
             "No crop boxes in --boxes-file for series: " + ", ".join(missing) + ". "

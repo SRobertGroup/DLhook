@@ -1,10 +1,13 @@
 """Hypocotyl length, curvature and diameter from a binary hypocotyl mask -- pure numpy/OpenCV/skimage.
 
 All distances are in crop pixels; `to_mm` converts with a scale. The hypocotyl is described by its
-midline: the longest skeleton path of the mask's largest component, oriented from the junction
-end, optionally cut at the collar, resampled every 1 px and smoothed. Length is the arc length,
+midline: the longest skeleton path of the junction's piece of the mask (the component nearest the
+junction plus pieces within BRIDGE_PX of it, joined; the largest component without a junction),
+oriented from the junction end, optionally cut at the collar, resampled every 1 px and smoothed. Length is the arc length,
 curvature the signed curvature of the smoothed midline and the diameter the median transect width
-perpendicular to the midline.
+(on the mask shrunk by DIAMETER_ERODE_PX)
+perpendicular to the midline. Length and diameter are validated against hand measurements
+(multi/validate_traits.py); the curvature is experimental -- not validated.
 """
 from __future__ import annotations
 
@@ -20,8 +23,13 @@ STATION_SPACING_PX = 5.0      # diameter transects every this many px along the 
 STATION_INNER_FRACTION = 0.8  # ... over the inner 80% of it
 MARCH_STEP_PX = 0.25
 MAX_HALF_WIDTH_PX = 60.0      # a transect running further than this on one side is dropped
+DIAMETER_ERODE_PX = 1         # transects run on the mask shrunk by this much: the four-class mask extends
+                              # about 1 px past each edge (hand validation, 201 BerryBox v2 frames: +2 px)
 MIN_PATH_PX = 12              # shorter midlines give no traits
 BORDER_PX = 2                 # slack for "touches the crop border"
+MIN_PART_PX = 15              # smaller mask pieces are noise when choosing the junction's piece
+BRIDGE_PX = 10.0              # pieces closer than this to the junction's piece are the same hypocotyl
+BRIDGE_WIDTH_PX = 3
 
 _NEIGHBOURS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
@@ -35,12 +43,60 @@ def _binary(mask):
     return (m > 127).astype(np.uint8)
 
 
+def _diameter_mask(mask, erode=DIAMETER_ERODE_PX):
+    """The binary mask the diameter transects run on: eroded by `erode` px (a (2e+1)^2 square)."""
+    binary = _binary(mask)
+    if binary is None or erode <= 0:
+        return binary
+    return cv2.erode(binary, np.ones((2 * erode + 1, 2 * erode + 1), np.uint8))
+
+
 def _largest_component(binary):
     n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     if n <= 1:
         return None
     k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     return (labels == k).astype(np.uint8)
+
+
+def _closest_pair(a_pts, b_pts):
+    """(distance, a point, b point) of the closest pair between two (N, 2) arrays of (x, y)."""
+    best = (float("inf"), None, None)
+    for start in range(0, len(a_pts), 2048):            # chunked: crops are small, but stay bounded
+        chunk = a_pts[start:start + 2048]
+        d = np.hypot(chunk[:, None, 0] - b_pts[None, :, 0], chunk[:, None, 1] - b_pts[None, :, 1])
+        i, j = np.unravel_index(int(np.argmin(d)), d.shape)
+        if d[i, j] < best[0]:
+            best = (float(d[i, j]), chunk[i], b_pts[j])
+    return best
+
+
+def _junction_component(binary, junction, min_part=MIN_PART_PX, bridge=BRIDGE_PX):
+    """The hypocotyl piece the junction belongs to: the component (>= `min_part` px) nearest to the
+    junction, plus every further component within `bridge` px of the growing union (a split
+    hypocotyl), each joined by a thin line between the closest pixels. A neighbour seedling or debris
+    further away is left out. None when no component is large enough."""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    parts = [k for k in range(1, n) if stats[k, cv2.CC_STAT_AREA] >= min_part]
+    if not parts:
+        return None
+    pts = {}
+    for k in parts:
+        ys, xs = np.nonzero(labels == k)
+        pts[k] = np.stack([xs, ys], axis=1).astype(float)
+    j = np.array([[float(junction[0]), float(junction[1])]])
+    seed = min(parts, key=lambda k: _closest_pair(j, pts[k])[0])
+    out = (labels == seed).astype(np.uint8)
+    union, left = pts[seed], [k for k in parts if k != seed]
+    while left:
+        dist, a, b, k = min((_closest_pair(union, pts[k]) + (k,) for k in left), key=lambda t: t[0])
+        if dist > bridge:
+            break
+        out[labels == k] = 1
+        cv2.line(out, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])), 1, thickness=BRIDGE_WIDTH_PX)
+        union = np.vstack([union, pts[k]])
+        left.remove(k)
+    return out
 
 
 def _skeleton_longest_path(component):
@@ -103,7 +159,7 @@ def _oriented_path(mask, junction):
     binary = _binary(mask)
     if binary is None or not binary.any():
         return None
-    comp = _largest_component(binary)
+    comp = _largest_component(binary) if junction is None else _junction_component(binary, junction)
     if comp is None:
         return None
     path = _skeleton_longest_path(comp)
@@ -252,7 +308,7 @@ def hypocotyl_traits(mask, junction, collar=None):
     out["length_px"] = _arc_length(mid)
     out["length_truncated"] = bool(truncated)
     out["curvature_mean"], out["curvature_max"] = _curvature_stats(mid)
-    widths = _transect_widths(_binary(mask), mid)
+    widths = _transect_widths(_diameter_mask(mask), mid)
     out["n_transects"] = len(widths)
     if widths:
         out["diameter_px"] = float(np.median(widths))

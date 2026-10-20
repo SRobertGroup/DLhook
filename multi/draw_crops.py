@@ -378,7 +378,7 @@ def build_arg_parser():
                          help="Directory of series subfolders (default: <repo>/example_data)")
     parser.add_argument("--out", default=None,
                          help="data/crop_boxes/crop_boxes.json path -- loaded on startup if it exists (resumable), "
-                              "saved atomically on every box edit (default: <repo>/crop_boxes.json)")
+                              "saved atomically on every box edit (default: data/crop_boxes/crop_boxes.json)")
     parser.add_argument("--existing", action="append", default=[], metavar="[LABEL=]PATH",
                          help="Show an earlier set of boxes read-only (repeatable): a crop folder, its "
                               "manifest.csv, or a boxes .json. Your boxes that touch one turn magenta.")

@@ -3,6 +3,7 @@
 A mixin of seedling_measurement.Gui: the methods run on the Gui instance and use its state."""
 import threading
 import traceback
+import tkinter as tk
 from tkinter import messagebox
 from tkinter.filedialog import asksaveasfilename
 
@@ -86,5 +87,32 @@ class ExportMixin:
     def _open_kinematics_window(self):
         """Phase 8: opens the aggregate kinematics graph, reading whatever is
         currently in frame_results_by_crop -- works from Start Analysis,
-        Preview seedling, or Export results alike."""
-        KinematicsWindow(self)
+        Preview seedling, or Export results alike. An open window is raised and
+        redrawn rather than duplicated, so there is one plot to keep up to date."""
+        window = self._live_kinematics_window()
+        if window is not None:
+            window.lift()
+            window.refresh()
+            return
+        self.kinematics_window = KinematicsWindow(self)
+
+    def _live_kinematics_window(self):
+        """The open KinematicsWindow, or None (never opened, or closed since)."""
+        window = getattr(self, "kinematics_window", None)
+        if window is None:
+            return None
+        try:
+            alive = bool(window.winfo_exists())
+        except tk.TclError:
+            alive = False
+        if not alive:
+            self.kinematics_window = None
+            return None
+        return window
+
+    def _notify_results_changed(self):
+        """Main thread only. Called after an edit in a seedling's analysis window (landmarks applied,
+        frame blanked, germination set, seedling re-segmented): the open kinematics plot redraws."""
+        window = self._live_kinematics_window()
+        if window is not None:
+            window.schedule_refresh()

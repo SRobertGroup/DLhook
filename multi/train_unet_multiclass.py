@@ -412,6 +412,16 @@ def run_measurable_validation(model, positives: dict, negatives: dict, device, p
             "measurable_n": len(pos) + len(neg)}
 
 
+def marks_csv_for(config: dict, raw_dir):
+    """The landmark-marks CSV of a crop folder under `landmarks.marks_dir` (utils/landmark_marks.py,
+    corrections from ui/seg_annotator.py), or None when the key is unset or the file is missing."""
+    marks_dir = (config.get("landmarks") or {}).get("marks_dir")
+    if not marks_dir:
+        return None
+    path = resolved_path(config, "marks_dir", section="landmarks") / (Path(str(raw_dir)).name + ".csv")
+    return str(path) if path.exists() else None
+
+
 def load_extra_landmark_sources(config: dict, sources, existing: dict, patch_size: int, stride: int,
                                 negatives: dict | None = None):
     """Landmark-only annotation sets from `landmarks.extra_sources` (a list of {csv, raw_dir,
@@ -437,7 +447,8 @@ def load_extra_landmark_sources(config: dict, sources, existing: dict, patch_siz
         raw_dir = resolved_path(holder, "raw_dir", section="src")
         lms, report = load_landmarks(resolved_path(holder, "csv", section="src"),
                                      root_csv_path=(resolved_path(holder, "root_csv", section="src")
-                                                    if src.get("root_csv") else None))
+                                                    if src.get("root_csv") else None),
+                                     marks_csv=marks_csv_for(config, raw_dir))
         tag = src.get("tag")
         keyed = namespace_landmarks(lms, tag) if tag else lms
         if src.get("seedling_groups"):
@@ -542,7 +553,10 @@ def run_training(config: dict, resume: bool = False) -> dict:
         all_landmarks, lm_report = load_landmarks(resolved_path(config, "csv", section="landmarks"),
                                                   exclude_filenames=val_names,
                                                   root_csv_path=(resolved_path(config, "root_csv", section="landmarks")
-                                                                 if lm_cfg.get("root_csv") else None))
+                                                                 if lm_cfg.get("root_csv") else None),
+                                                  marks_csv=marks_csv_for(config, resolved_path(config, "raw_data_dir")))
+        if any(k.startswith("marks_") for k in lm_report):
+            print("Landmark marks: " + ", ".join(f"{k} {v}" for k, v in lm_report.items() if k.startswith("marks_")))
         print(f"Landmarks: {lm_report['loaded']} loaded, {lm_report['excluded']} in the validation split "
               f"(dropped), {lm_report['invalid']} unusable"
               + (f", {lm_report['with_root']} with collar/root" if "with_root" in lm_report else ""))
@@ -608,7 +622,8 @@ def run_training(config: dict, resume: bool = False) -> dict:
     sampling = lm_cfg.get("sampling", "uniform") if use_landmarks else "uniform"
     if sampling not in ("uniform", "angle_balanced"):
         raise ValueError("landmarks.sampling must be 'uniform' or 'angle_balanced'")
-    if oversample > 1.0:
+    negative_weight = float(lm_cfg.get("negative_weight", 1.0)) if use_measurable else 1.0
+    if oversample > 1.0 or negative_weight != 1.0:
         # Annotated crops are a small fraction of the patches: draw them more often. With
         # sampling: angle_balanced each angle bin (closed / middle / open hook) is drawn equally
         # often among the annotated crops, on top of the oversampling.
@@ -620,7 +635,7 @@ def run_training(config: dict, resume: bool = False) -> dict:
                               for b, label in enumerate(("closed", "middle", "open"))
                               if any(angle_bin(lm.theta) == b for lm in lm_train.values())))
         sample_weights = [oversample * balance.get(row["filename"], 1.0) if row["filename"] in lm_train
-                          else float(lm_cfg.get("negative_weight", 1.0)) if row["filename"] in neg_train else 1.0
+                          else negative_weight if row["filename"] in neg_train else 1.0
                           for row in train_dataset.rows]
         sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_dataset), replacement=True)
         train_loader = DataLoader(train_dataset, batch_size=training_cfg["batch_size"],

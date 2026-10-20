@@ -381,3 +381,25 @@ def test_run_real_skips_an_unreadable_frame_and_keeps_going(tmp_path, monkeypatc
         frames = [r["source_frame"] for r in csv.DictReader(fh)]
     assert frames == ["a.png", "c.png"]                                   # the bad frame is absent, the rest is cut
     assert "Skipped 1 unreadable frame" in capsys.readouterr().out
+
+
+def _plates(root, names):
+    import cv2
+    for name in names:
+        (root / name).mkdir(parents=True)
+        cv2.imwrite(str(root / name / f"{name}_001.png"), np.full((200, 200, 3), 120, np.uint8))
+
+
+def test_main_crops_only_the_series_the_boxes_file_covers(tmp_path, capsys):
+    import json
+    _plates(tmp_path / "ex", ["A", "B"])
+    boxes = tmp_path / "boxes.json"
+    boxes.write_text(json.dumps({"A": [{"cx": 100, "cy": 100, "half_w": 40, "half_h": 60}]}), encoding="utf-8")
+    out = tmp_path / "out"
+    assert recrop_plates.main(["--input-dir", str(tmp_path / "ex"), "--output-dir", str(out),
+                               "--boxes-file", str(boxes)]) == 0
+    assert "Skipping 1 series with no boxes in --boxes-file: B" in capsys.readouterr().out
+    assert [p.name for p in out.glob("*.png")] == ["0-crop-A_A_001.png"]          # {crop_id}-crop-{series}_{frame}
+    # an explicit --series without boxes is still an error
+    assert recrop_plates.main(["--input-dir", str(tmp_path / "ex"), "--output-dir", str(out),
+                               "--boxes-file", str(boxes), "--series", "B", "--dry-run"]) == 1

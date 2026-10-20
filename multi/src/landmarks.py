@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import random
 from dataclasses import dataclass, replace
 
@@ -113,7 +114,35 @@ def _attach_roots(out, root_csv_path):
     return n
 
 
-def load_landmarks(csv_path, exclude_filenames=(), root_csv_path=None):
+def apply_marks(out, marks_csv):
+    """Override junction / collar of the landmarks in `out` with the CORRECTED points of a
+    utils/landmark_marks.py CSV (ui/seg_annotator.py markers). A corrected junction moves only the
+    junction (axes and angle unchanged); a corrected collar keeps the crop's root direction, else the
+    one stored with the mark, and is dropped without either. Returns counts."""
+    from utils.landmark_marks import MarksStore
+    counts = {"marks_junction": 0, "marks_collar": 0, "marks_collar_no_root": 0}
+    store = MarksStore(str(marks_csv))
+    for crop in store.rows:
+        lm = out.get(crop)
+        if lm is None:
+            continue
+        c = store.corrected(crop)
+        if c["junction"] is not None:
+            lm = replace(lm, junction=c["junction"])
+            counts["marks_junction"] += 1
+        if c["collar"] is not None:
+            root_dir = lm.root_dir or c["root_dir"]
+            if root_dir is None:
+                counts["marks_collar_no_root"] += 1
+            else:
+                lm = replace(lm, collar=c["collar"], root_dir=tuple(root_dir),
+                             root_len=lm.root_len or MIN_RAY_LENGTH)
+                counts["marks_collar"] += 1
+        out[crop] = lm
+    return counts
+
+
+def load_landmarks(csv_path, exclude_filenames=(), root_csv_path=None, marks_csv=None):
     """Landmarks from an annotation CSV (measured rows only), keyed by crop file.
 
     `exclude_filenames` is the leakage guard: pass the validation split's crop
@@ -122,7 +151,8 @@ def load_landmarks(csv_path, exclude_filenames=(), root_csv_path=None):
     loaded / excluded / invalid rows (an invalid row is one whose clicks cannot
     be oriented, e.g. both axis points on opposite sides of the junction).
     `root_csv_path` (a ui/root_annotator.py CSV) adds the collar and root direction to
-    the crops it covers; report["with_root"] counts them."""
+    the crops it covers; report["with_root"] counts them. `marks_csv` (a utils/landmark_marks.py
+    CSV) then applies the corrected junction / collar points (apply_marks; counts in the report)."""
     exclude = set(exclude_filenames)
     out, report = {}, {"loaded": 0, "excluded": 0, "invalid": 0}
     for row in read_rows(csv_path):                         # the review sidecar is applied
@@ -148,6 +178,8 @@ def load_landmarks(csv_path, exclude_filenames=(), root_csv_path=None):
         report["loaded"] += 1
     if root_csv_path:
         report["with_root"] = _attach_roots(out, root_csv_path)
+    if marks_csv and os.path.exists(marks_csv):
+        report.update(apply_marks(out, marks_csv))
     return out, report
 
 

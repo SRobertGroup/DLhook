@@ -141,6 +141,8 @@ def build_arg_parser():
     p.add_argument("--errors", default=None,
                    help="per-crop errors CSV (crop_file, err) from multi.validate_landmarks --per-crop-out: "
                         "biggest model-vs-you disagreement first")
+    p.add_argument("--only-errors", action="store_true",
+                   help="review only the frames listed in --errors (e.g. a list of suspect labels)")
     p.add_argument("--skipped", action="store_true",
                    help="review the frames skipped AFTER germination instead of the measured ones")
     p.add_argument("--germination", default=None, help="germination CSV, required with --skipped")
@@ -158,7 +160,10 @@ def main(argv=None) -> int:
         queue = skipped_after_onset_queue(args.csv, args.germination, args.folder, manifest)
         print(f"{len(queue)} frames skipped after germination, of {len({i.seedling_key for i in queue})} seedlings")
     else:
-        queue = disagreement_queue(args.csv, args.folder, errors)
+        if args.only_errors and not errors:
+            print("--only-errors needs --errors")
+            return 2
+        queue = disagreement_queue(args.csv, args.folder, errors, only_errors=args.only_errors)
         print(f"{len(queue)} measured frames" + (", biggest model disagreement first" if errors
                                                  else ", open hooks first (no --errors given)"))
     if not queue:

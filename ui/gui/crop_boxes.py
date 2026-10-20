@@ -1,6 +1,8 @@
 """Crop-box editing, saving/loading and the per-frame seed point (collar).
 
 A mixin of seedling_measurement.Gui: the methods run on the Gui instance and use its state."""
+import os
+
 import cv2
 from tkinter import messagebox, simpledialog
 from tkinter.filedialog import askopenfilename, asksaveasfilename
@@ -9,6 +11,13 @@ from ui.crop_box_canvas import clamp_point_to_box
 from utils.apicalhook_angle import mask_below_seed_line
 from utils.crop_boxes_io import boxes_to_entries, load_boxes_json, save_boxes_json
 from utils.crop_layout import clamp_to_image, spatial_order
+from utils.paths import data_path
+
+
+def _boxes_dir():
+    """data/crop_boxes/ (where the draw_crops boxes files live) when it exists, else the dialog's default."""
+    folder = data_path("crop_boxes")
+    return {"initialdir": folder} if os.path.isdir(folder) else {}
 
 
 class CropBoxMixin:
@@ -80,7 +89,7 @@ class CropBoxMixin:
             return
         path = asksaveasfilename(
             parent=self.root, title="Save crop boxes", defaultextension=".json",
-            filetypes=[("JSON", "*.json")], initialfile="crop_boxes.json")
+            filetypes=[("JSON", "*.json")], initialfile="crop_boxes.json", **_boxes_dir())
         if not path:
             return
         try:
@@ -101,7 +110,8 @@ class CropBoxMixin:
         if not self.file_list:
             messagebox.showinfo("Load boxes", "Open an image directory first.", parent=self.root)
             return
-        path = askopenfilename(parent=self.root, title="Load crop boxes", filetypes=[("JSON", "*.json")])
+        path = askopenfilename(parent=self.root, title="Load crop boxes", filetypes=[("JSON", "*.json")],
+                               **_boxes_dir())
         if not path:
             return
         try:

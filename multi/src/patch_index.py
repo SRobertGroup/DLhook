@@ -93,10 +93,16 @@ def build_patch_index(
     background_keep_ratio: float,
     annotations_dirs: dict | None = None,
     image_glob: str = "*.png",
+    groups: dict | None = None,
 ):
     """Returns (n_train, n_val) patch counts and writes
     `<out_dir>/train_patches.csv` and `<out_dir>/val_patches.csv`, each with
     columns: filename, x, y, patch_size, foreground_fraction.
+
+    `groups` ({filename: group key}, e.g. (series, crop_id) from a recrop manifest -- see
+    `seedling_groups`) makes the split per group instead of per image: every frame of a seedling lands
+    on the same side, so validation measures new plants, not new frames of trained ones. Files not in
+    `groups` are their own group. Annotated files keep their annotation split either way.
     """
     if len(class_names) != num_classes:
         raise ValueError(
@@ -115,10 +121,19 @@ def build_patch_index(
 
     unannotated = [p.name for p in mask_paths if p.name not in annotated_split]
     rng = random.Random(split_seed)
-    shuffled = sorted(unannotated)
-    rng.shuffle(shuffled)
-    n_val = round(len(shuffled) * val_fraction)
-    val_set = set(shuffled[:n_val])
+    if groups:
+        by_group = {}
+        for name in sorted(unannotated):
+            by_group.setdefault(groups.get(name, ("file", name)), []).append(name)
+        keys = sorted(by_group, key=str)
+        rng.shuffle(keys)
+        n_val_groups = round(len(keys) * val_fraction)
+        val_set = {name for key in keys[:n_val_groups] for name in by_group[key]}
+    else:
+        shuffled = sorted(unannotated)
+        rng.shuffle(shuffled)
+        n_val = round(len(shuffled) * val_fraction)
+        val_set = set(shuffled[:n_val])
 
     def split_for(name: str) -> str:
         if name in annotated_split:
@@ -165,3 +180,18 @@ def build_patch_index(
             writer.writerows(rows[split])
 
     return len(rows["train"]), len(rows["val"])
+
+
+def seedling_groups(manifest_path):
+    """{crop file name: (series, crop_id)} from a recrop_plates manifest (output_path, series,
+    crop_id columns) -- the `groups` of a seedling-level split. {} when the file is missing."""
+    import csv
+    import os
+    out = {}
+    if not manifest_path or not os.path.exists(manifest_path):
+        return out
+    with open(manifest_path, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            name = os.path.basename(row["output_path"].replace("\\", "/"))
+            out[name] = (row.get("series", ""), row.get("crop_id", ""))
+    return out

@@ -204,14 +204,16 @@ class WorkItem:
         return f"Seedling {self.seedling_id}" + (f"  [{self.series}]" if self.series else "")
 
 
-def build_queue(crops, per_seedling, seed):
+def build_queue(crops, per_seedling, seed, min_frame=0):
     """Reproducible random sample of `per_seedling` frames per seedling
     (None / too large -> every frame), grouped by seedling and shuffled within
-    it so the annotator is blind to time order."""
+    it so the annotator is blind to time order. `min_frame` drops each seedling's
+    first frames (0-based position in its time-ordered frames) before sampling:
+    late frames hold the measurable and open hooks."""
     queue = []
     for (series, crop_id), frames in crops.items():
         rng = random.Random(f"{seed}:{series}:{crop_id}")
-        frames = list(frames)
+        frames = list(frames)[max(0, int(min_frame or 0)):]
         if per_seedling and per_seedling < len(frames):
             chosen = rng.sample(frames, per_seedling)
         else:
@@ -222,13 +224,30 @@ def build_queue(crops, per_seedling, seed):
     return queue
 
 
-def load_queue(folder, per_seedling, seed, manifest_path=None, split=None, patch_index_dir=None):
+def parse_seedlings(spec):
+    """"Camera_2:7,Plate 2:9" -> {("Camera_2", 6), ("Plate 2", 8)}: (series, crop_id) from 1-based
+    seedling ids as the annotator shows them; a bare "7" means seedling 7 of an unnamed series."""
+    out = set()
+    for item in (spec or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        series, _, sid = item.rpartition(":")
+        out.add((series.strip(), int(sid) - 1))
+    return out
+
+
+def load_queue(folder, per_seedling, seed, manifest_path=None, split=None, patch_index_dir=None, min_frame=0,
+               seedlings=None):
     """The frames to annotate, exactly as the annotator builds them (the
-    sample is deterministic given these arguments)."""
+    sample is deterministic given these arguments). `seedlings` ({(series, crop_id)}, see
+    parse_seedlings) keeps only those plants."""
     crops = discover_crops(folder, manifest_path)
+    if seedlings:
+        crops = {k: v for k, v in crops.items() if k in seedlings}
     if split:
         crops = filter_crops(crops, load_split_filenames(patch_index_dir, split))
-    return build_queue(crops, per_seedling, seed)
+    return build_queue(crops, per_seedling, seed, min_frame)
 
 
 def repeat_queue(source_csvs, n=200, seed=0, max_per_seedling=4, folder=None):

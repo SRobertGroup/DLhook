@@ -33,6 +33,13 @@ Assumptions you should know about:
   training. Run the annotation tool with --split val (as recommended) and the
   annotated frames themselves are held out.
 
+Test sets: the default is the two hand-measured sets no landmark model was trained on, pooled --
+BerryBox v2 (angle_berrybox_val.csv, cropped_berrybox_val; 12 MP plate camera) and round5
+(angle_round5.csv, cropped_round5; the older 5 MP plate camera, crowded Plate_*_Old plates). --truth and
+--crops take comma-separated, paired lists; the summary is printed pooled and per set. Every former
+validation set (angle_ground_truth.csv, angle_validation.csv, the open sets) is now a landmark training
+source, so scoring a landmark model on them measures the training fit, not accuracy.
+
 A landmark checkpoint (multi/configs/training_landmarks.yaml) can be scored the
 same way with --landmark-checkpoint: its angle comes from the junction heatmap
 and direction fields, not from ellipse fits, and is reported as `landmark`
@@ -312,11 +319,17 @@ def write_series_csv(path, series, truth, full_preds):
                             **{k: ("" if p.get(k) is None else p[k]) for k in SERIES_FIELDS[6:]}})
 
 
+# (annotation CSV, crop folder): hand-measured plants no landmark model was trained on
+TEST_SETS = [("data/annotations/angles/angle_berrybox_val.csv", "data/crops/cropped_berrybox_val"),
+             ("data/annotations/angles/angle_round5.csv", "data/crops/cropped_round5")]
+
+
 def build_arg_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--truth", default=str(_REPO_ROOT / "data/annotations/angles/angle_ground_truth.csv"))
-    p.add_argument("--crops", default=str(_REPO_ROOT / "data/crops/cropped_training_set"),
-                   help="Folder of crops with its manifest.csv")
+    p.add_argument("--truth", default=",".join(str(_REPO_ROOT / t) for t, _ in TEST_SETS),
+                   help="Annotation CSV(s), comma-separated (default: the independent test sets, pooled)")
+    p.add_argument("--crops", default=",".join(str(_REPO_ROOT / c) for _, c in TEST_SETS),
+                   help="Crop folder(s) with their manifest.csv, comma-separated, one per --truth")
     p.add_argument("--backends", default="binary,multiclass", help="Comma-separated: binary, multiclass")
     p.add_argument("--landmark-checkpoint", default=None,
                    help="Also score landmark-head checkpoints (best.pt from training_landmarks.yaml), comma-separated; "
@@ -338,18 +351,32 @@ def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
     sys.path.insert(0, str(_REPO_ROOT))
     os.chdir(_REPO_ROOT)                   # backends resolve weight paths relative to the repo root
-    crops_dir = Path(args.crops).resolve()      # run_backend changes directory: a relative path would break
+    truths = [t.strip() for t in args.truth.split(",") if t.strip()]
+    crop_dirs = [Path(c.strip()).resolve() for c in args.crops.split(",") if c.strip()]   # run_backend changes directory
+    if len(truths) != len(crop_dirs):
+        raise SystemExit(f"--truth has {len(truths)} file(s) but --crops {len(crop_dirs)} folder(s): pair them")
     if args.geometric_overhook:
         args.keep_overhook = True
-    truth = load_truth(args.truth, fold=not args.keep_overhook, geometric=args.geometric_overhook)
-    series = load_series(crops_dir / "manifest.csv", truth)
-    print(f"{len(truth)} measured frames, {len(series)} seedlings, "
-          f"{sum(len(v) for v in series.values())} crops to run")
+    sets = []                                # (name, truth rows, series, crops_dir)
+    for truth_path, crops_dir in zip(truths, crop_dirs):
+        rows = load_truth(truth_path, fold=not args.keep_overhook, geometric=args.geometric_overhook)
+        for r in rows:
+            r["set"] = Path(truth_path).stem
+        sets.append((Path(truth_path).stem, rows, load_series(crops_dir / "manifest.csv", rows), crops_dir))
+    keys = [k for _, _, ser, _ in sets for k in ser]
+    if len(keys) != len(set(keys)):
+        raise SystemExit("two test sets share a (series, crop_id): their predictions would collide")
+    truth = [r for _, rows, _, _ in sets for r in rows]
+    series = OrderedDict((k, v) for _, _, ser, _ in sets for k, v in ser.items())
+    for name, rows, ser, _ in sets:
+        print(f"{name}: {len(rows)} measured frames, {len(ser)} seedlings, {sum(len(v) for v in ser.values())} crops to run")
 
     results_by_backend, csv_rows = OrderedDict(), []
     full_preds = {}                          # reading name -> {(series, crop_id, crop_file): value}, every frame
     for name in [b.strip() for b in args.backends.split(",") if b.strip()]:
-        pred = run_backend(name, series, crops_dir, args.seed_pad)
+        pred = {}
+        for _, _, ser, crops_dir in sets:
+            pred.update(run_backend(name, ser, crops_dir, args.seed_pad))
         if not args.keep_overhook:
             pred = fold_predictions(pred)
         rows = []
@@ -365,7 +392,9 @@ def main(argv=None) -> int:
                     {k: p.get(k) for k in ("raw_flip", "recon")})
 
     for spec in [s.strip() for s in (args.landmark_checkpoint or "").split(",") if s.strip()]:
-        pred = run_landmarks(spec, series, crops_dir, geometric_overhook=args.geometric_overhook)
+        pred = {}
+        for _, _, ser, crops_dir in sets:
+            pred.update(run_landmarks(spec, ser, crops_dir, geometric_overhook=args.geometric_overhook))
         if not args.keep_overhook:
             pred = fold_predictions(pred)
         parts = [p.strip() for p in spec.split("+")]
@@ -385,7 +414,7 @@ def main(argv=None) -> int:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fields = ["backend", "series", "crop_id", "frame", "crop_file", "gt", "gt_overhook",
+    fields = ["backend", "set", "series", "crop_id", "frame", "crop_file", "gt", "gt_overhook",
               "raw", "raw_flip", "recon", "state", "landmark", "landmark_recon", "landmark_temporal",
               "landmark_monotone"]
     with open(out_dir / "angle_validation.csv", "w", newline="", encoding="utf-8") as fh:
@@ -396,6 +425,11 @@ def main(argv=None) -> int:
     write_series_csv(out_dir / "angle_series.csv", series, truth, full_preds)
 
     table = format_table(results_by_backend)
+    if len(sets) > 1:
+        table = "pooled (" + " + ".join(name for name, *_ in sets) + ")\n" + table
+        for name, *_ in sets:
+            table += f"\n\n{name}\n" + format_table(OrderedDict(
+                (b, [r for r in rows if r["set"] == name]) for b, rows in results_by_backend.items()))
     print()
     print(table)
     for backend, rows in results_by_backend.items():

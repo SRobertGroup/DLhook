@@ -33,7 +33,7 @@ class ZoomableImageCanvas(tk.Canvas):
     into, and left click is reserved for placing landmarks.
     """
 
-    def __init__(self, parent, width=600, height=600, **kwargs):
+    def __init__(self, parent, width=600, height=600, pan=False, **kwargs):
         super().__init__(parent, width=width, height=height, bg="#FFFFFF", **kwargs)
         self.display_width = width
         self.display_height = height
@@ -53,6 +53,12 @@ class ZoomableImageCanvas(tk.Canvas):
         self._overlay = []
 
         self.bind("<MouseWheel>", self._on_mousewheel)  # Windows/macOS
+        # Opt-in right-drag pan (the seg annotator paints with the left button at high zoom).
+        self._pan_from = None
+        if pan:
+            self.bind("<ButtonPress-3>", self._pan_start)
+            self.bind("<B3-Motion>", self._pan_move)
+            self.bind("<ButtonRelease-3>", lambda e: setattr(self, "_pan_from", None))
         self.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, ZOOM_STEP))  # Linux scroll up
         self.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / ZOOM_STEP))  # Linux scroll down
 
@@ -66,26 +72,6 @@ class ZoomableImageCanvas(tk.Canvas):
         into, instead of resetting to fit-to-window on every frame change.
         reset_view=True forces a fresh fit-to-window, for a caller switching
         to an image of a different size."""
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
-        if overlay is not None:
-            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
         if overlay is not None:
             self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
         is_first_image = self._image is None or reset_view
@@ -125,12 +111,15 @@ class ZoomableImageCanvas(tk.Canvas):
              "arrow": bool, "dash": bool}
             {"kind": "polyline", "pts": [(x, y), ...], "color": c}   (fixed screen width)
             {"kind": "contour", "pts": [(x, y), ...], "color": c, "alpha": 0.5}
-        A "contour" is alpha-blended into the displayed (zoomed) image along its own pixels only
+            {"kind": "mask", "mask": HxW bool array, "color": c, "alpha": 0.4}   (filled)
+        A "mask" is alpha-blended over its pixels (nearest-neighbour at the zoom, so painted
+        pixels stay crisp). A "contour" is alpha-blended into the displayed (zoomed) image along its own pixels only
         (Tk canvas lines have no alpha), so it stays 1-2 screen px wide at any zoom and the raw
         image is untouched elsewhere."""
-        had_contour = any(s["kind"] == "contour" for s in self._overlay)
+        blended = ("contour", "mask")
+        had_contour = any(s["kind"] in blended for s in self._overlay)
         self._overlay = list(shapes)
-        if had_contour or any(s["kind"] == "contour" for s in self._overlay):
+        if had_contour or any(s["kind"] in blended for s in self._overlay):
             self._redraw()          # contours are blended into the image itself
         else:
             self._draw_overlay()
@@ -218,6 +207,37 @@ class ZoomableImageCanvas(tk.Canvas):
         return (self._center_x - half_view_w, self._center_y - half_view_h,
                 self._center_x + half_view_w, self._center_y + half_view_h)
 
+    def _pan_start(self, event):
+        self._pan_from = (event.x, event.y)
+
+    def _pan_move(self, event):
+        if self._pan_from is None or self._image is None:
+            return
+        dx, dy = event.x - self._pan_from[0], event.y - self._pan_from[1]
+        self._pan_from = (event.x, event.y)
+        self._center_x -= dx / self.zoom
+        self._center_y -= dy / self.zoom
+        self._clamp_center()
+        self._redraw()
+
+    def _blend_masks(self, resized, ix1, iy1, ix2, iy2):
+        """Alpha-blend every "mask" overlay shape (filled) into the zoomed image."""
+        masks = [s for s in self._overlay if s["kind"] == "mask" and s.get("mask") is not None]
+        if not masks:
+            return resized
+        out = resized.astype(np.float32)
+        oh, ow = resized.shape[:2]
+        for shape in masks:
+            m = np.asarray(shape["mask"])
+            part = m[iy1:iy2, ix1:ix2]                 # exactly the region _redraw shows
+            if part.size == 0 or not part.any():
+                continue
+            layer = cv2.resize(part.astype(np.uint8), (ow, oh), interpolation=cv2.INTER_NEAREST) > 0
+            a = float(shape.get("alpha", 0.4))
+            rgb = np.array(_hex_to_rgb(shape.get("color", "#00ff00")), np.float32)
+            out[layer] = out[layer] * (1 - a) + rgb * a
+        return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
     def _blend_contours(self, resized, ix1, iy1):
         """Alpha-blend every "contour" overlay shape into the zoomed image, on the line's own pixels
         only (anti-aliased, CONTOUR_WIDTH_PX wide at screen scale)."""
@@ -268,6 +288,7 @@ class ZoomableImageCanvas(tk.Canvas):
         # are blended after the conversion, in RGB.
         if resized.ndim == 3 and resized.shape[2] == 3:
             resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        resized = self._blend_masks(resized, ix1, iy1, ix2, iy2)
         resized = self._blend_contours(resized, ix1, iy1)
         self._photo = ImageTk.PhotoImage(image=Image.fromarray(resized))
         self.delete("all")

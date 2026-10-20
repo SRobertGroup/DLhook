@@ -10,7 +10,7 @@ often the tip drove the angle for a head that has them. Unlike multi/validate_an
 manifest and no seedling series: one crop, one comparison.
 
     python -m multi.validate_landmarks --truth data/annotations/angles/angle_new.csv --root-truth data/annotations/angles/angle_new_root.csv \
-        --folder data/crops/cropped_new_set --checkpoints multi/results/models_landmarks_v4/best.pt,multi/results/models_landmarks_v6/best.pt
+        --folder data/crops/cropped_new_set --checkpoints weights/landmarks/dlhook_landmarks_a.pt,multi/results/models_landmarks/best.pt
 
 A "+" inside one checkpoint entry (v6/best.pt+v11/best.pt) scores those checkpoints as an ensemble: their
 junction heatmaps, direction fields and optional maps are averaged before the readout

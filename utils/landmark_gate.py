@@ -41,8 +41,9 @@ MEMBER_SD_FILL = 90.0                  # member_theta_sd when any member readout
 ENV_VAR = "DLHOOK_LANDMARK_GATE"
 # Gate on the learned head: unreadable when 1 - measurable_p reaches this. Set from the threshold that
 # keeps 98% of the measured frames of the training runs' held-out seedlings
-# (multi/results/measurable_fit.json, written by multi/validate_measurable.py --fit).
-MEASURABLE_THRESHOLD = 0.5
+# (multi/results/measurable_fit.json, written by multi/validate_measurable.py --fit), for the
+# models_landmarks_all_{a,b,c}_mt ensemble (held-out AUC 0.964).
+MEASURABLE_THRESHOLD = 0.9186248378173392
 
 
 def unreadable_probability(peak, tip_peak, member_theta_sd):

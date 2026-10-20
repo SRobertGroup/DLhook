@@ -38,11 +38,12 @@ class KinematicsWindow(tk.Toplevel):
     color-coded by the reconstructed bio_state (Closed/Opening/Manual, see
     utils/angle_timeseries.py).
 
-    Manual-refresh only (confirmed with user) -- reads directly from
-    Gui.frame_results_by_crop/time_deltas/germination_detector on each
-    "Refresh" click, so it works with whatever data currently exists
-    (Start Analysis, Preview seedling, or Export results all populate the
-    same shared store), with no live-updating plumbing required.
+    Reads directly from Gui.frame_results_by_crop/time_deltas/germination_detector
+    on each refresh, so it works with whatever data currently exists (Start
+    Analysis, Preview seedling, or Export results all populate the same shared
+    store). It redraws by itself when a seedling's analysis window changes a
+    result (Gui._notify_results_changed -> schedule_refresh); "Refresh" covers
+    everything else (a new analysis or export run).
 
     Each seedling's x-axis is zeroed at its own germination frame -- either
     detected by GerminationDetector or set by hand in SeedlingAnalysisWindow,
@@ -67,6 +68,7 @@ class KinematicsWindow(tk.Toplevel):
 
         # Clicking a point opens that seedling's analysis window at that frame.
         self._pick_targets = {}      # scatter artist -> (crop_id, frame indices in plotted order)
+        self._refresh_job = None     # pending schedule_refresh redraw
         self.canvas.mpl_connect("pick_event", self._on_pick)
 
         bottom = tk.Frame(self)
@@ -91,6 +93,16 @@ class KinematicsWindow(tk.Toplevel):
         else:
             best = event.ind[0]
         self.gui.open_seedling_frame(crop_id, frame_indices[best])
+
+    def schedule_refresh(self, delay_ms=150):
+        """Redraw shortly, once: a burst of edits (e.g. "Apply to all seedlings") costs one redraw."""
+        if self._refresh_job is not None:
+            self.after_cancel(self._refresh_job)
+        self._refresh_job = self.after(delay_ms, self._run_scheduled_refresh)
+
+    def _run_scheduled_refresh(self):
+        self._refresh_job = None
+        self.refresh()
 
     def refresh(self):
         self.ax.clear()

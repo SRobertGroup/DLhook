@@ -10,7 +10,8 @@ so what it writes is what the GUI would show and export:
 - series.csv          one row per seedling per frame, the GUI export (utils/export_rows.py);
 - seedling_NN.png     per seedling: bio angle, junction-collar distance and collar deviation
                       from the seedling's stable collar, with unreadable and flagged frames marked;
-- summary.txt         per seedling: frames read, unreadable, temporal flags.
+- summary.txt         per seedling: frames read, unreadable, temporal flags;
+- seedlings.csv       GUI seedling_id -> box index in the boxes file (the GUI numbers boxes spatially).
 
 The crops go to a scratch data folder (--data-dir, default <out>/data), never the repo's data/.
 `--checkpoints a.pt+b.pt+c.pt` swaps the landmark ensemble (e.g. to compare a retrained one).
@@ -65,7 +66,8 @@ def build_gui(images, boxes_file, series=None):
     loaded = load_boxes_json(boxes_file, gui.series_name)
     _, boxes, collars = loaded
     raw = [dict(box, collar=list(c)) if c is not None else dict(box) for box, c in zip(boxes, collars)]
-    boxes, collars, _ = gui._normalise_boxes(raw)
+    boxes, collars, order = gui._normalise_boxes(raw)
+    gui.box_file_order = order          # GUI seedling k+1 is box order[k] of the boxes file
     gui.crop_boxes, gui.collar_overrides = boxes, collars
     gui.transformed_mid_points = [(b["cx"], b["cy"]) for b in boxes]
 
@@ -73,6 +75,17 @@ def build_gui(images, boxes_file, series=None):
     trusted = not metadata_has_gaps(gui.metadata_list)
     gui.time_deltas = compute_time_deltas(gui.metadata_list, None, trust_timestamps=trusted)
     return gui
+
+
+def write_seedling_map(gui, path):
+    """seedlings.csv: GUI seedling_id -> index of its box in the boxes file (the GUI renumbers boxes in
+    spatial order; crops cut by recrop_plates and their annotations keep the file order)."""
+    import csv
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["seedling_id", "box_index", "cx", "cy"])
+        for k, (box, i) in enumerate(zip(gui.crop_boxes, getattr(gui, "box_file_order", range(len(gui.crop_boxes))))):
+            w.writerow([k + 1, i, box["cx"], box["cy"]])
 
 
 def export_rows(gui):
@@ -202,6 +215,7 @@ def main(argv=None):
     gui._run_analysis()
     df = export_rows(gui)
     df.to_csv(out / "series.csv", index=False)
+    write_seedling_map(gui, out / "seedlings.csv")
     summary = summarise(df)
     (out / "summary.txt").write_text(summary + "\n", encoding="utf-8")
     print(summary)

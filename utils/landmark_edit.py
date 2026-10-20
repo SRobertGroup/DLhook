@@ -207,3 +207,59 @@ def landmark_shapes(points=None, readout=None, *, arrow_min=40, color=None):
     if color is not None:
         shapes = [dict(s, color=color) for s in shapes]
     return shapes
+
+
+# --- turning a model reading into a manual one --------------------------------------------------
+HYPO_POINTS_PX = (10.0, 40.0)      # synthetic H1 / H2 distance from the junction along hypo_dir
+COTYL_BASE_PX = 2.0                # synthetic C1 (base) distance from the junction along cotyl_dir
+COTYL_MIN_PX = 20.0                # synthetic C2 (tip) distance when the reading has no tip
+ROOT_POINT_PX = 30.0               # synthetic root point distance from the collar along root_dir
+
+
+def session_from_readout(readout):
+    """A LandmarkClickSession whose clicks reproduce `readout` (model or manual): junction, two
+    hypocotyl points along hypo_dir, cotyledon base / tip along cotyl_dir (the tip at the reading's
+    tip distance when it has one), then its collar and a root point along root_dir. Its result()
+    (overhook=False) has the reading's theta and bio = 180 - theta, as the model reports them.
+    None when the reading has no junction or directions."""
+    if not readout or readout.get("junction") is None or readout.get("hypo_dir") is None \
+            or readout.get("cotyl_dir") is None:
+        return None
+    j = np.asarray(readout["junction"], float)
+    h = np.asarray(readout["hypo_dir"], float)
+    c = np.asarray(readout["cotyl_dir"], float)
+    if np.hypot(*h) < 1e-9 or np.hypot(*c) < 1e-9:
+        return None
+    h, c = h / np.hypot(*h), c / np.hypot(*c)
+    tip = readout.get("tip")
+    reach = max(COTYL_MIN_PX, float(np.hypot(*(np.asarray(tip, float) - j)))) if tip is not None else COTYL_MIN_PX
+    session = LandmarkClickSession()
+    for p in (j, j + HYPO_POINTS_PX[0] * h, j + HYPO_POINTS_PX[1] * h, j + COTYL_BASE_PX * c, j + reach * c):
+        session.add(float(p[0]), float(p[1]))
+    collar = readout.get("collar")
+    if collar is not None:
+        session.add(float(collar[0]), float(collar[1]))
+        root_dir = readout.get("root_dir")
+        if root_dir is not None:
+            r = np.asarray(collar, float) + ROOT_POINT_PX * np.asarray(root_dir, float)
+            session.add(float(r[0]), float(r[1]))
+    return session
+
+
+def previous_collar(frame_results, seed_id, index):
+    """(frame index, collar, root_dir) of the nearest frame before `index` whose collar can be
+    trusted: a Manual frame with a collar, or a model reading the gate kept and the time-series
+    checks did not flag for its collar. None when there is none."""
+    for k in range(index - 1, -1, -1):
+        result = frame_results[k]
+        if result is None:
+            continue
+        readout = (result.get("landmarks") or {}).get(seed_id)
+        if not readout or readout.get("collar") is None:
+            continue
+        manual = (result.get("state_dict") or {}).get(seed_id) == "Manual" or readout.get("edit") == "manual"
+        trusted = manual or readout.get("collar_edit") == "manual" or (
+            not readout.get("gated") and "collar" not in (readout.get("temporal_flag") or ""))
+        if trusted:
+            return k, tuple(float(v) for v in readout["collar"]), readout.get("root_dir")
+    return None

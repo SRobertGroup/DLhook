@@ -125,6 +125,25 @@ def test_build_queue_all_frames_when_n_is_large_or_none(tmp_path):
         assert sorted(i.frame for i in q) == [f"IMG_{k:03d}" for k in range(7)]
 
 
+def test_build_queue_min_frame_keeps_only_late_frames(tmp_path):
+    crops = discover_crops(str(_make_folder(tmp_path, ids=(0, 1), frames=12)))
+    q = build_queue(crops, None, seed=0, min_frame=8)
+    assert sorted({i.frame for i in q}) == [f"IMG_{k:03d}" for k in range(8, 12)] and len(q) == 8
+    assert {i.frame for i in build_queue(crops, 2, seed=0, min_frame=8)} <= {f"IMG_{k:03d}" for k in range(8, 12)}
+    assert build_queue(crops, None, seed=0, min_frame=50) == []                  # past the end: nothing left
+    assert build_queue(crops, 5, seed=3, min_frame=0) == build_queue(crops, 5, seed=3)   # default unchanged
+
+
+def test_annotator_cli_passes_min_frame(tmp_path, capsys):
+    from ui.angle_annotator import main
+
+    _make_folder(tmp_path, ids=(0,), frames=10)
+    out = tmp_path / "gt.csv"
+    assert main(["--folder", str(tmp_path), "--out", str(out), "--per-seedling", "0", "--min-frame", "6",
+                 "--mark-unrecorded-skipped"]) == 0
+    assert "4 in the sample" in capsys.readouterr().out
+
+
 def test_seedling_id_is_one_based():
     assert WorkItem(0, "f", "0-crop-f.png").seedling_id == 1
 
@@ -275,3 +294,16 @@ def test_next_refuses_to_discard_five_unsaved_points(tmp_path):
         assert app.index == 0 and app.store.get(app.item) is None
     finally:
         app.destroy()
+
+
+def test_seedlings_filter_keeps_whole_series(tmp_path):
+    from utils.angle_annotation import load_queue, parse_seedlings
+    import cv2
+    import numpy as np
+    for cid in (0, 1):
+        for f in range(4):
+            cv2.imwrite(str(tmp_path / f"{cid}-crop-F_{f:03d}.png"), np.zeros((4, 4, 3), np.uint8))
+    assert parse_seedlings("Camera_2:7, Plate 2:9") == {("Camera_2", 6), ("Plate 2", 8)}
+    q = load_queue(str(tmp_path), None, 0, seedlings=parse_seedlings("2"))
+    assert {w.crop_id for w in q} == {1} and len(q) == 4
+    assert len(load_queue(str(tmp_path), None, 0)) == 8

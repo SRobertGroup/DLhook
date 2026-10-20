@@ -135,3 +135,31 @@ def test_min_foreground_fraction_and_background_keep_ratio_are_applied(tmp_path)
 
     assert n_train == 0
     assert n_val == 0
+
+
+def test_seedling_split_keeps_every_frame_of_a_plant_on_one_side(tmp_path):
+    from multi.src.patch_index import seedling_groups
+
+    masks_dir = tmp_path / "masks"
+    masks_dir.mkdir()
+    manifest = tmp_path / "manifest.csv"
+    with open(manifest, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["output_path", "series", "source_frame", "crop_id"])
+        for plant in range(10):
+            for frame in range(4):
+                name = f"{plant}-crop-S_{frame:03d}.png"
+                _write_mask(masks_dir / name, size=64, value=1)
+                w.writerow(["\\".join(["data", "crops", "x", name]), "S", f"S_{frame:03d}.tif", plant])   # Windows-style, as recrop writes
+    groups = seedling_groups(str(manifest))
+    assert groups["3-crop-S_002.png"] == ("S", "3") and len(groups) == 40
+    build_patch_index(masks_dir=masks_dir, out_dir=tmp_path / "idx", patch_size=32, train_stride=32,
+                      val_fraction=0.3, num_classes=4, class_names=CLASS_NAMES, split_seed=1,
+                      min_foreground_fraction=0.0, background_keep_ratio=1.0, groups=groups)
+    side = {}
+    for split in ("train", "val"):
+        for row in _read_csv(tmp_path / "idx" / f"{split}_patches.csv"):
+            side.setdefault(groups[row["filename"]], set()).add(split)
+    assert all(len(s) == 1 for s in side.values())                  # no plant on both sides
+    assert sum(s == {"val"} for s in side.values()) == 3            # 30% of the 10 plants
+    assert seedling_groups(str(tmp_path / "missing.csv")) == {}

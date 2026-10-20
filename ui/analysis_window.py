@@ -11,7 +11,8 @@ from utils.gui_thread_safety import ProgressReporter
 from utils.angle_timeseries import sync_angle_and_state_lists
 from utils.germination_detector import GerminationDetector
 from utils.hypocotyl_traits import hypocotyl_midline, hypocotyl_traits, to_mm
-from utils.landmark_edit import FLAG_COLOR, LandmarkClickSession, MUTED_COLOR, landmark_shapes
+from utils.landmark_edit import (FLAG_COLOR, LandmarkClickSession, MUTED_COLOR, landmark_shapes,
+                                 previous_collar, session_from_readout)
 from utils.landmark_temporal import describe_flag
 from utils.landmark_edits import edit_record, series_name_from_path, write_edit
 from utils.angle_annotation import parse_crop_filename
@@ -113,6 +114,10 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.bind("<Return>", self._on_enter)
         self.bind("<KP_Enter>", self._on_enter)
         self.bind("<Delete>", lambda event: self._blank_angle())   # same as "Blank this frame"
+        for key in ("a", "A"):
+            self.bind(f"<KeyPress-{key}>", lambda event: self._accept_reading())     # "Accept reading"
+        for key in ("c", "C"):
+            self.bind(f"<KeyPress-{key}>", lambda event: self._use_previous_collar())  # "Previous collar"
 
         zoom_frame = tk.Frame(self)
         zoom_frame.grid(row=0, column=4, padx=4, pady=8, sticky="n")
@@ -180,6 +185,10 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.blank_angle_button = tk.Button(manual_frame, text="Blank this frame", width=14,
                                              command=self._blank_angle)
         self.blank_angle_button.pack(side=tk.LEFT, padx=(4, 0))
+        tk.Button(manual_frame, text="Accept reading", width=14,
+                  command=self._accept_reading).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Button(manual_frame, text="Previous collar", width=14,
+                  command=self._use_previous_collar).pack(side=tk.LEFT, padx=(4, 0))
         tk.Checkbutton(manual_frame, text="Save edits for retraining", variable=self.save_edits_var,
                        command=self._on_save_edits_toggle).pack(side=tk.LEFT, padx=(8, 0))
 
@@ -296,6 +305,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self._update_nav_state()
         self._midline_cache.clear()
         self._render_current_frame()
+        self._results_changed()
 
     # --- Frame navigation ------------------------------------------------
 
@@ -470,6 +480,72 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         except ValueError as exc:
             messagebox.showwarning("Cannot compute angle", str(exc), parent=self)
             return
+        self._commit_manual(result, manual)
+
+    def _accept_reading(self):
+        """Keep the model's reading of this frame as shown -- also a grey (gated) or amber (flagged)
+        one -- as a Manual frame, with the model's angle (180 - theta). Same commit as Apply landmarks."""
+        if not self.frame_results or self._manual_mode:
+            return
+        result = self.frame_results[self.current_frame]
+        if result is None:
+            return
+        seed_id = self._current_seed_id()
+        if (result.get("state_dict") or {}).get(seed_id) == "Manual":
+            self.status_label.configure(text="Already manual")
+            return
+        readout = (result.get("landmarks") or {}).get(seed_id)
+        session = session_from_readout(readout)
+        if session is None:
+            self.status_label.configure(text="No model reading to accept -- place the landmarks")
+            return
+        try:
+            manual = session.result(overhook=False)
+        except ValueError as exc:
+            messagebox.showwarning("Cannot accept reading", str(exc), parent=self)
+            return
+        # Keep exactly the theta the window showed (a gated frame keeps it as gated_theta).
+        shown = readout.get("gated_theta", readout.get("theta")) if readout.get("gated") else readout.get("theta")
+        if shown is not None and np.isfinite(shown):
+            manual["theta"] = float(shown)
+            manual["bio"] = 180.0 - float(shown)
+        manual["accepted"] = True          # a model reading the user confirmed, not clicked
+        self._commit_manual(result, manual)
+        self.status_label.configure(text="Reading accepted")
+
+    def _use_previous_collar(self):
+        """Give this frame the collar of the nearest earlier frame whose collar is trusted (Manual, or
+        readable and not collar-flagged). The angle is unchanged; the traits and the time-series flags
+        follow the new collar."""
+        if not self.frame_results or self._manual_mode:
+            return
+        result = self.frame_results[self.current_frame]
+        if result is None:
+            return
+        seed_id = self._current_seed_id()
+        readout = (result.get("landmarks") or {}).get(seed_id)
+        if not readout or readout.get("junction") is None:
+            self.status_label.configure(text="No reading on this frame -- place the landmarks")
+            return
+        found = previous_collar(self.frame_results, seed_id, self.current_frame)
+        if found is None:
+            self.status_label.configure(text="No earlier frame with a trusted collar")
+            return
+        k, collar, root_dir = found
+        readout["collar"] = collar
+        readout["root_dir"] = root_dir
+        readout["collar_edit"] = "manual"
+        file_name = self.cropped_filenames[self.current_frame]
+        result.setdefault("traits", {})[seed_id] = hypocotyl_traits(
+            self.gui._trait_mask(file_name, result.get("hypo_mask")), readout["junction"], collar)
+        self._midline_cache.pop(self.current_frame, None)
+        self.gui._reconstruct_series_for_crop(self.crop_id)      # re-derives the time-series flags
+        self._render_current_frame()
+        self._results_changed()
+        self.status_label.configure(text=f"Collar from frame {k + 1}")
+
+    def _commit_manual(self, result, manual):
+        """Store `manual` (a LandmarkClickSession.result) as this frame's Manual reading."""
         file_name = self.cropped_filenames[self.current_frame]
         seed_id = self._current_seed_id()
         model_readout = (result.get("landmarks") or {}).get(seed_id)
@@ -501,6 +577,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.gui._reconstruct_series_for_crop(self.crop_id)
         self._reset_manual_angle()
         self._render_current_frame()
+        self._results_changed()
 
     def _blank_angle(self):
         if not self.frame_results:
@@ -519,6 +596,13 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         # branch-alignment input lets its neighbours re-resolve.
         self.gui._reconstruct_series_for_crop(self.crop_id)
         self._render_current_frame()
+        self._results_changed()
+
+    def _results_changed(self):
+        """Tell the Gui a result changed, so an open kinematics plot redraws (main thread)."""
+        notify = getattr(self.gui, "_notify_results_changed", None)
+        if notify is not None:
+            notify()
 
     # --- Germination time-zero -------------------------------------------
 
@@ -536,6 +620,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             return
         self._germination_detector().set_override(self.crop_id, self.current_frame)
         self._update_germination_label()
+        self._results_changed()
 
     def _apply_germination_to_all(self):
         """Same germination frame for every seedling on the plate -- the usual
@@ -546,11 +631,13 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         for crop_id in range(len(self.gui.crop_boxes)):
             detector.set_override(crop_id, self.current_frame)
         self._update_germination_label()
+        self._results_changed()
 
     def _clear_germination_frame(self):
         """Drop the manual override, falling back to automatic detection."""
         self._germination_detector().clear_override(self.crop_id)
         self._update_germination_label()
+        self._results_changed()
 
     def _update_germination_label(self):
         detector = self.gui.germination_detector
@@ -662,10 +749,15 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             p_text = "-" if p_unreadable is None else f"{p_unreadable:.2f}"
             theta_text = "-" if gt is None else f"{gt:.0f}°"
             text += (f"\nno reading (unreadable p={p_text}; model θ={theta_text})"
-                     " -- Apply landmarks to set one")
+                     " -- A accepts it as shown, or place the landmarks")
+        elif readout and readout.get("series_edit") == "rejected" and source != "manual":
+            theta = readout.get("theta")
+            theta_text = "-" if theta is None else f"{180 - theta:.0f}°"
+            text += (f"\nreading {theta_text} rejected by the series filter (far from its neighbours)"
+                     " -- A accepts it as shown, or place the landmarks")
         elif readout and readout.get("temporal_flag") and source != "manual":
             text += ("\n⚠ " + describe_flag(readout["temporal_flag"], readout.get("temporal_collar_dev"))
-                     + " -- check this frame (Apply landmarks or Del to correct)")
+                     + " -- A accepts, C takes the previous collar, Del blanks")
 
         traits = (result.get("traits") or {}).get(seed_id)
         if traits and isinstance(traits.get("length_px"), (int, float)) and not np.isnan(traits["length_px"]):

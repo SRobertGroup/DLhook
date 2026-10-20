@@ -10,6 +10,8 @@ Run:
     python -m ui.angle_annotator --folder data/images
     python -m ui.angle_annotator --folder data/images --per-seedling 15 --seed 1
     python -m ui.angle_annotator --folder data/crops/cropped_training_set --split val   # multiclass training crops
+    python -m ui.angle_annotator --folder data/crops/cropped_round5 --min-frame 45 --per-seedling 0   # late frames only
+    python -m ui.angle_annotator --folder data/crops/cropped_berrybox_val --per-seedling 0 --seedlings "Camera_2:7,Plate 2:9" --out data/annotations/angles/angle_series_bbval.csv   # full time series
 
 Per frame, click five points (mouse wheel zooms at the cursor):
     1. the JUNCTION where the cotyledons meet the hypocotyl
@@ -26,7 +28,10 @@ re-offers 200 already-measured frames blind (see utils/angle_annotation.repeat_q
 measurements with python -m multi.analyze_repeatability.
 
 Frames are a reproducible random sample (--per-seedling, --seed), grouped by
-seedling and shuffled within it so the annotation is blind to time order. The
+seedling and shuffled within it so the annotation is blind to time order.
+--min-frame N leaves out each seedling's first N frames (position in its time-ordered
+crops; with crops cut by recrop_plates --every-n 1 that is the series frame number), so
+the sample goes to the late frames where the hook is measurable and opening. The
 CSV (default: data/annotations/angles/angle_ground_truth.csv) is saved after every frame and
 the tool resumes where you stopped.
 
@@ -58,7 +63,7 @@ from utils.landmark_edit import (  # noqa: E402
     COTYL_COLOR, HYPO_COLOR, JUNCTION_COLOR, landmark_shapes,
 )
 from utils.angle_annotation import (  # noqa: E402
-    AngleClickSession, AnnotationStore, default_manifest, load_queue, orient_axis, repeat_queue,
+    AngleClickSession, AnnotationStore, default_manifest, load_queue, orient_axis, parse_seedlings, repeat_queue,
 )
 
 HELP_TEXT = (
@@ -77,12 +82,12 @@ class AngleAnnotatorApp(tk.Tk):
     CANVAS_W, CANVAS_H = 560, 720
 
     def __init__(self, folder, out_path, per_seedling=10, seed=0, manifest_path=None, split=None,
-                 patch_index_dir=None, queue=None, store=None):
+                 patch_index_dir=None, queue=None, store=None, min_frame=0, seedlings=None):
         super().__init__()
         self.title("DLhook - angle ground truth")
         self.folder = folder
         self.queue = queue if queue is not None else load_queue(
-            folder, per_seedling, seed, manifest_path, split, patch_index_dir)
+            folder, per_seedling, seed, manifest_path, split, patch_index_dir, min_frame, seedlings)
         if not self.queue:
             messagebox.showerror("No crops found", chr(10).join((
                 "No usable {id}-crop-{frame}.png files in:", folder, "",
@@ -290,6 +295,12 @@ def build_arg_parser():
     parser.add_argument("--per-seedling", type=int, default=10,
                         help="Random frames to annotate per seedling; 0 = every frame (default: 10)")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the frame sample (default: 0)")
+    parser.add_argument("--min-frame", type=int, default=0,
+                        help="Leave out each seedling's first N frames (0-based position in its time-ordered crops; "
+                             "the series frame number when the crops were cut with --every-n 1). Default 0")
+    parser.add_argument("--seedlings", default=None, metavar="SERIES:ID[,SERIES:ID]",
+                        help="Only these seedlings (ids as shown, 1-based), e.g. \"Camera_2:7,Plate 2:9\". With "
+                             "--per-seedling 0, every frame of each: a full time series")
     parser.add_argument("--repeat-of", default=None, metavar="CSV[,CSV]",
                         help="Blind re-measurement for a human-error study: instead of the usual sample, offer "
                              "--repeat-n frames already measured in these CSVs, at random, in shuffled order, with "
@@ -316,7 +327,8 @@ def main(argv=None) -> int:
     out_path = args.out or os.path.join(_REPO_ROOT, "data/annotations/angles/angle_ground_truth.csv")
     manifest = args.manifest or default_manifest(folder)
     if args.mark_unrecorded_skipped:
-        queue = load_queue(folder, args.per_seedling or None, args.seed, manifest, args.split, args.patch_index_dir)
+        queue = load_queue(folder, args.per_seedling or None, args.seed, manifest, args.split, args.patch_index_dir,
+                           args.min_frame, parse_seedlings(args.seedlings))
         store = AnnotationStore(out_path)
         added = store.skip_unrecorded(queue)
         done, skipped = store.counts(queue)
@@ -333,7 +345,7 @@ def main(argv=None) -> int:
         print(f"Blind repeat: {len(queue)} frames of {len({i.seedling_key for i in queue})} seedlings -> {out_path}")
     app = AngleAnnotatorApp(folder, out_path, per_seedling=args.per_seedling or None, seed=args.seed,
                             manifest_path=manifest, split=args.split, patch_index_dir=args.patch_index_dir,
-                            queue=queue)
+                            queue=queue, min_frame=args.min_frame, seedlings=parse_seedlings(args.seedlings))
     app.mainloop()
     return 0
 

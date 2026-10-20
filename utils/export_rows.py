@@ -16,7 +16,7 @@ from utils.hypocotyl_traits import to_mm
 BASE_COLUMNS = ['img_name', 'seedling_id', 'raw_angle', 'state', 'bio_angle',
                 'time_elapsed_min', 'germination_frame']
 LANDMARK_COLUMNS = ['angle_source', 'landmark_edit', 'landmark_peak', 'overhook_flag',
-                    'unreadable_p', 'unreadable', 'measurable_p', 'temporal_flag',
+                    'unreadable_p', 'unreadable', 'measurable_p', 'temporal_flag', 'series_edit',
                     'junction_x', 'junction_y', 'hypo_dir_x', 'hypo_dir_y', 'cotyl_dir_x', 'cotyl_dir_y',
                     'cotyl_base_x', 'cotyl_base_y', 'cotyl_tip_x', 'cotyl_tip_y', 'collar_x', 'collar_y',
                     'collar_ref_x', 'collar_ref_y', 'root_dir_x', 'root_dir_y']
@@ -78,6 +78,7 @@ def build_export_row(filename, seed_id, result, elapsed, germ_frame, um_per_px=N
         row['unreadable'] = '' if gate is None else int(bool(gate))
         row['measurable_p'] = _cell(readout.get("measurable_p"))   # the learned head, when the models have it
         row['temporal_flag'] = readout.get("temporal_flag") or ''   # utils/landmark_temporal.py (flag only)
+        row['series_edit'] = readout.get("series_edit") or ''       # utils/landmark_timeseries (robust series)
         for key, cx, cy in _POINT_COLUMNS:
             pt = readout.get(key)
             if pt is not None and len(pt) >= 2:

@@ -152,7 +152,7 @@ DLHOOK_ANGLE_SOURCE=ellipse python main.py     # legacy ellipse method
 DLHOOK_LANDMARK_GATE=0 python main.py          # keep every landmark reading (no readability gate)
 ```
 
-On the final BerryBox v2 validation set (287 hand-measured frames, plants no model had seen) the landmark ensemble has a mean error of **13.5°** (median **7.0°**; 13.9° for the previous members, not a significant difference), against **26.8°** for the ellipse pipeline; repeating your own measurement by hand differs by **4.2°** on average (see [`docs/AUDIT.md`](docs/AUDIT.md), §8). The landmark angle is a folded angle, `180 - theta`; the automatic overhook flag is exported separately and does not change `bio_angle`. Landmarks are read from the plain crop, so they need no segmentation mask: an angle exists even where a mask is empty.
+On the final BerryBox v2 validation set (287 hand-measured frames, plants no model had seen) the landmark ensemble has a mean error of **13.5°** (median **7.0°**; 13.9° for the previous members, not a significant difference), against **26.8°** for the ellipse pipeline; repeating your own measurement by hand differs by **4.2°** on average. The landmark angle is a folded angle, `180 - theta`; the automatic overhook flag is exported separately and does not change `bio_angle`. Landmarks are read from the plain crop, so they need no segmentation mask: an angle exists even where a mask is empty.
 
 **Readability gate.** The ensemble reads an angle on every frame, including frames with no usable information (the ones an annotator would skip). A gate rejects such frames:
 

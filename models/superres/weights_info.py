@@ -1,6 +1,6 @@
 """Where the Real-ESRGAN x4plus weights live and how they are fetched (pure constants, no heavy imports).
 
-The 64 MB file is not tracked in git (docs/AUDIT.md H-6). `RealesrganSuperresolution` downloads it
+The 64 MB file is not tracked in git. `RealesrganSuperresolution` downloads it
 from the official Real-ESRGAN release on first use and checks the SHA-256 below.
 """
 import os

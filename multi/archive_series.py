@@ -2,7 +2,7 @@
 """Archive a duplicate series from the crop sets, optionally keeping some seedlings under another series.
 
 Written for `simpler_AGJKV`: 25 frames byte-identical to frames of `AGJKV system pictures`, so 14 of
-its 17 seedlings are the same plants as AGJKV seedlings already in the data (docs/AUDIT.md, section 8).
+its 17 seedlings are the same plants as AGJKV seedlings already in the data.
 The other 3 are real plants of that rig that have no twin; they are kept and renamed into the
 target series, which is exact because the frames are identical files.
 

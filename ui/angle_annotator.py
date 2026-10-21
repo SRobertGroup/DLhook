@@ -4,7 +4,7 @@
 Shows seedling crops (the `{id}-crop-{frame}.png` files the GUI writes to
 data/images/) one at a time, zoomed, and lets you measure the apical-hook angle
 by hand. The result is a CSV of ground truth to validate the automatic
-pipeline against (docs/AUDIT.md, finding H-5).
+pipeline against.
 
 Run:
     python -m ui.angle_annotator --folder data/images

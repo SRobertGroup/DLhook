@@ -1,4 +1,4 @@
-"""Score the learned "measurable" head against the readability gate it replaces (audit M-10).
+"""Score the learned "measurable" head against the readability gate it replaces.
 
     python -m multi.validate_measurable --fit           # threshold from the training runs' held-out seedlings
     python -m multi.validate_measurable                 # score on BerryBox v2 val (no model has seen it)

@@ -416,7 +416,7 @@ ANGLE_SOURCE_ENV = "DLHOOK_ANGLE_SOURCE"
 DEFAULT_ANGLE_SOURCE = "landmarks"
 VALID_ANGLE_SOURCES = ("landmarks", "ellipse")
 # "+"-joined spec, the syntax LandmarkEnsemble.from_checkpoints takes. The default members carry the
-# learned "measurable" head (audit M-10; multi/configs/training_landmarks_all_{a,b,c}_mt.yaml): on
+# learned "measurable" head (multi/configs/training_landmarks_all_{a,b,c}_mt.yaml): on
 # BerryBox v2 they gate 76% of the skipped frames at 99% of the measured kept, and the angle error is
 # 13.5 deg against 13.9 for the previous members (multi/results/measurable_validation_mt.json,
 # angle_validation_bbval_*). A machine holding only the previous members uses those, with the

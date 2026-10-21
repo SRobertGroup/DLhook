@@ -28,8 +28,9 @@ graphify-out/
 2025_Radianu/
 example_data/
 BerryBox/ivport-v2/Test_images/
+_archive_simpler_AGJKV/
 
-# Large files kept out of git (docs/AUDIT.md H-6)
+# Large files kept out of git
 # Real-ESRGAN weights: downloaded on first use (models/superres/weights_info.py)
 models/superres/RealESRGAN_x4plus.pth
 # demo animation
@@ -57,3 +58,14 @@ cropped_*/
 
 # Scratch outputs that older versions wrote into the working directory
 img_angle_data.csv
+
+# Internal documents (not for external users)
+docs/AUDIT.md
+docs/audit.html
+docs/audit_style.css
+docs/build_audit_html.py
+found_bugs.md
+update_plan.md
+multi/session_recap.md
+multi/next_points_action.md
+

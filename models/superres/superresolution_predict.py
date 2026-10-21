@@ -13,7 +13,7 @@ import numpy as np
 
 from utils.model_download import ensure_file
 
-# The 64 MB weights are not tracked in git (docs/AUDIT.md H-6): fetched on first use, see weights_info.py
+# The 64 MB weights are not tracked in git: fetched on first use, see weights_info.py
 from models.superres.weights_info import WEIGHTS_PATH, WEIGHTS_SHA256, WEIGHTS_URL
 
 

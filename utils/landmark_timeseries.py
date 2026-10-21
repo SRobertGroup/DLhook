@@ -61,8 +61,8 @@ def _interpolate_gaps(values, max_gap, blocked=None):
 def monotone_opening(bio, step=2.5, lo=0.0, hi=180.0):
     """Best non-increasing fit to a bio-angle series, in the L1 sense (robust to a lone wrong frame).
 
-    After germination a hook is maintained and then opens; it does not close again (docs/AUDIT.md
-    section 8: the errors are lone frames read far from their neighbours). The fit is the dynamic
+    After germination a hook is maintained and then opens; it does not close again (the errors
+    are lone frames read far from their neighbours). The fit is the dynamic
     programme over angle levels every `step` degrees: level_t <= level_{t-1}, cost sum |obs_t - level_t|,
     NaN frames cost nothing and take whatever level the path has there. An input with no
     value at all comes back unchanged. Unlike a median filter this constrains the order of the

@@ -1,8 +1,8 @@
 name: tests
 
+# Manual only: run it from the Actions tab ("Run workflow") when you want a clean-machine check.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   pytest:

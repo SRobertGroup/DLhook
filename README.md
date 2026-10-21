@@ -108,7 +108,14 @@ python main.py
 
 ### Model weights
 
-The default pipeline needs these files. **None of them is in git** (they are untracked, like `weights/multiclass/`): they must be obtained from the maintainers or copied from the machine that trained them, and put at exactly these paths.
+The default pipeline needs the files below. **They are not in git**: they are deposited on Zenodo ([doi:10.5281/zenodo.23531884](https://doi.org/10.5281/zenodo.23531884)). Download them into the repository with
+
+```bash
+python -m utils.fetch_weights          # the files below
+python -m utils.fetch_weights --all    # also the fallback and legacy files
+```
+
+Every file is checked against a pinned SHA-256, and a file that is already there is never replaced. Alternatively, download the zip from Zenodo, unzip it and copy its `weights/` folder into the repository. Nothing is downloaded when DLhook starts.
 
 | File | Provides | Used for |
 |---|---|---|
@@ -270,7 +277,7 @@ Saving to an existing file replaces only this folder's entry. When loading, the 
 
 Runs segmentation and the landmark ensemble across every frame and every crop, then computes the per-frame angles and hypocotyl traits. Progress is shown in the bar at the bottom of the window: cropping occupies the first 30%, segmentation and angle computation the remainder.
 
-When it finishes, the status reads *"Analysis complete -- use Preview seedling to review, or Export results when done"*.
+When it finishes, the analysis window opens on the first frame that needs a human look, and the status says how many there are (see [Reviewing flagged frames](#reviewing-flagged-frames) below). With nothing flagged, it reads *"Analysis complete -- nothing flagged; Preview seedling to check, or Export results"*.
 
 ![Start Analysis running](docs/img/workflow/05_analysis_running.png)
 
@@ -286,7 +293,7 @@ Opens a picker; choose a seedling to open its **`Seedling N - analysis`** window
 
 **Viewing**
 - `Launch segmentation`: only needed if this seedling has not been segmented yet. Re-segmenting replaces the seedling's results, so you are asked first when it holds manual frames.
-- `Show:` `Cotyledon` (green alpha contour) · `Hypocotyl` (yellow smoothed midline) · `Landmarks` (junction, axes and arrows of the current reading, model or manual) · `Germination` (magenta contour, off by default; only shown with the legacy `binary` backend, which still segments the radicle).
+- `Show:` `Cotyledon` (green alpha contour) · `Hypocotyl` (yellow smoothed midline) · `Landmarks` (junction, axes and arrows of the current reading, model or manual) · `Collar` (the collar and root arrow of the reading; untick it to see the hypocotyl base unobstructed) · `Germination` (magenta contour, off by default; only shown with the legacy `binary` backend, which still segments the radicle).
 - `<--` / `-->` step through frames.
 - `Zoom +` / `Zoom -` / `Reset zoom`, or the mouse wheel.
 
@@ -309,14 +316,16 @@ The raw image is shown at full intensity; the overlays are thin lines only, so y
 
 ![Placing landmarks by hand: the angle is complete after C2, the prompt offers the optional collar](docs/img/workflow/10_manual_landmarks.png)
 
-The prompt in the status line names the next click. The angle is complete after C2; `Enter` applies the landmarks (the two optional points can be left out), `BackSpace` undoes the last point and `Escape` resets. Anywhere in the window, `←` / `→` step through the frames and `↑` / `↓` (or the `▲ Seedling` / `Seedling ▼` buttons) open the previous / next seedling at the same frame, in the same place on screen. Once C2 is placed, the `Overhook` box is **ticked automatically** when the cotyledon ray crosses the hypocotyl ray (the same test as for the model's reading); you can still tick or untick it. `Apply landmarks` commits the frame as **Manual** (an overhooked hook is stored as `180 + theta`, otherwise `180 - theta`), recomputes the hypocotyl traits with your collar (or the model's) and re-reconstructs the series around your frame. Two shortcuts avoid re-clicking a reading that is nearly right:
+The prompt in the status line names the next click. The angle is complete after C2; `Enter` applies the landmarks (the two optional points can be left out), `BackSpace` undoes the last point and `Escape` resets. Anywhere in the window, `←` / `→` step through the frames and `↑` / `↓` (or the `▲ Seedling` / `Seedling ▼` buttons) open the previous / next seedling at the same frame, in the same place on screen. Once C2 is placed, the `Overhook` box is **ticked automatically** when the cotyledon ray crosses the hypocotyl ray (the same test as for the model's reading); you can still tick or untick it. `Apply landmarks` commits the frame as **Manual** (an overhooked hook is stored as `180 + theta`, otherwise `180 - theta`), recomputes the hypocotyl traits with your collar (or the model's) and re-reconstructs the series around your frame. Applying also leaves click mode, so arrows and the other keys work again at once; with `Save edits for retraining` ticked, click mode stays on for the next correction. Two shortcuts avoid re-clicking a reading that is nearly right:
 
 - **`Accept reading`** (`A`) keeps the model's reading as shown, also a grey one the gate rejected or an amber one a time-series check flagged, and commits it as **Manual** with the model's angle. Use it when the landmarks are right but the frame was greyed out or flagged.
 - **`Previous collar`** (`C`) gives this frame the collar of the nearest earlier frame whose collar can be trusted (a Manual frame, or a readable one without a collar flag). The angle is unchanged; the hypocotyl length and the time-series flags follow the new collar. Use it when only the collar jumped.
 
 Both count as edits: the kinematics plot redraws, and with `Save edits for retraining` ticked an accepted reading is saved as a training record.
 
-`Blank this frame` discards the frame's measurement entirely — use it when the seedling has rotated so the cotyledon sits in front of or behind the hypocotyl, since a 2D image cannot yield a correct angle in that case.
+`Blank this frame` discards the frame's measurement entirely — use it when the seedling has rotated so the cotyledon sits in front of or behind the hypocotyl, since a 2D image cannot yield a correct angle in that case. A blanked frame's reading stays drawn in grey, like a frame the gate set aside; placing landmarks on it gives it an angle again.
+
+<a id="reviewing-flagged-frames"></a>**Reviewing flagged frames.** The frames that need a human are collected in a review queue across all analysed seedlings: readings the series filter rejected (*spike*) and readings a time-series check flagged (*collar*, *junction*). The `To review:` row at the bottom of the analysis window shows where you are (*3 of 27: spike*); `Next ▶` / `◀ Previous` (keys `N` / `P`) jump to the next queued frame, opening the next seedling when needed. Any edit on a frame (`Apply landmarks`, `A`, `Del`) marks it reviewed and removes it from the queue; `C` fixes only the collar, so the frame stays queued until its flag clears or you accept it with `A`. Frames the readability gate set aside are not queued by default, since most of them cannot be measured; tick `Include unreadable` to go through them as well. `Review flagged frames` in the main window reopens the queue at its first frame.
 
 **Saving corrections for retraining.** Tick `Save edits for retraining` (you are asked for a folder once). Each `Apply landmarks` then writes a JSON record (the clicked points, the overhook tick, the model reading it replaced) and a copy of the crop to that folder. Convert the records into annotation CSVs and a crop folder that the landmark training code reads with
 
@@ -631,3 +640,5 @@ The segmentation network architecture and the trained weights derive from [RootP
 Please cite this repository while we work on the manuscript describing the method (see also [`CITATION.cff`](CITATION.cff)):
 
 > David Radianu, Sara Raggi, Siamsa Doyle, Hemamshu Ratnakaram, Sandeep Yadav, Stéphanie Robert\*, Adrien Heymans\* (2025). DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings. v0.3.0.
+
+Pre-trained weights: Radianu D, Raggi S, Yadav S, Ratnakaram H, Doyle S, Robert S, Heymans A (2026). DLhook pre-trained weights v1.0. Zenodo. [doi:10.5281/zenodo.23531884](https://doi.org/10.5281/zenodo.23531884).

@@ -273,6 +273,8 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
         self.button_start_analysis.pack(fill=tk.X, pady=2)
         self.button_preview_seedlings = tk.Button(analysis_group, text="Preview seedling", command=self.open_seedling_picker)
         self.button_preview_seedlings.pack(fill=tk.X, pady=2)
+        self.button_review = tk.Button(analysis_group, text="Review flagged frames", command=self.review_flagged_frames)
+        self.button_review.pack(fill=tk.X, pady=2)
         self.button_kinematics = tk.Button(analysis_group, text="Show kinematics", command=self._open_kinematics_window)
         self.button_kinematics.pack(fill=tk.X, pady=2)
         self.button_export_results = tk.Button(analysis_group, text="Export results", command=self._export_results)
@@ -373,6 +375,7 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
         self.btn_load_boxes["state"] = normal if (self.file_list and not self._busy) else disabled
         self.button_start_analysis["state"] = normal if ready else disabled
         self.button_preview_seedlings["state"] = normal if ready else disabled
+        self.button_review["state"] = normal if (ready and self.frame_results_by_crop) else disabled
         self.button_kinematics["state"] = normal if ready else disabled
         self.button_export_results["state"] = normal if (ready and not self._exporting) else disabled
 
@@ -494,9 +497,15 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
         if event.get("done"):
             self._busy = False
             self._update_button_states()
-            self.progress_bar_label.configure(
-                text="Analysis failed -- see the error message" if error else
-                "Analysis complete -- use Preview seedling to review, or Export results when done")
+            if error:
+                self.progress_bar_label.configure(text="Analysis failed -- see the error message")
+            else:
+                # Put the user straight in front of the frames that need a human (spikes, flags).
+                n_review = self.review_flagged_frames(quiet=True)
+                self.progress_bar_label.configure(
+                    text=f"Analysis complete -- {n_review} frame(s) to review (N / P in the seedling window), "
+                         "then Export results" if n_review else
+                    "Analysis complete -- nothing flagged; Preview seedling to check, or Export results")
         if event.get("export_done"):
             self._busy = False
             self._exporting = False

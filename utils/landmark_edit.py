@@ -158,7 +158,7 @@ def _shapes_from_points(points, arrow_min):
     return shapes
 
 
-def _shapes_from_readout(readout, arrow_min):
+def _shapes_from_readout(readout, arrow_min, collar=True):
     if not readout or readout.get("junction") is None:
         return []
     j = _xy(readout["junction"])
@@ -173,7 +173,7 @@ def _shapes_from_readout(readout, arrow_min):
         shapes.append({"kind": "point", "xy": _xy(readout["base"]), "color": COTYL_COLOR, "label": "C1"})
     if readout.get("tip") is not None:
         shapes.append({"kind": "point", "xy": _xy(readout["tip"]), "color": COTYL_COLOR, "label": "C2"})
-    collar = readout.get("collar")
+    collar = readout.get("collar") if collar else None
     if collar is not None:
         c = _xy(collar)
         shapes.append({"kind": "point", "xy": c, "color": COLLAR_COLOR, "label": "collar"})
@@ -189,7 +189,7 @@ MUTED_COLOR = "#9a9a9a"      # a readout the readability gate rejected
 FLAG_COLOR = "#ffb000"       # a readout the time-series checks flagged (utils/landmark_temporal.py)
 
 
-def landmark_shapes(points=None, readout=None, *, arrow_min=40, color=None):
+def landmark_shapes(points=None, readout=None, *, arrow_min=40, color=None, collar=True):
     """Overlay shapes for `ZoomableImageCanvas.set_overlay`.
 
     `points` = {name: (x, y)} of clicked points (a session's `named_points()`, or the annotator's
@@ -197,11 +197,12 @@ def landmark_shapes(points=None, readout=None, *, arrow_min=40, color=None):
     along each oriented axis, and the collar -> root arrow. Otherwise `readout` (a model or manual
     readout dict): junction point, hypocotyl / cotyledon arrows along the stored directions,
     base / tip points and the collar with its root arrow when present. `color`, when given, replaces
-    every shape's colour (MUTED_COLOR for a gated model readout; default unchanged). Neither -> []."""
+    every shape's colour (MUTED_COLOR for a gated model readout; default unchanged). `collar=False`
+    leaves the readout's collar and root arrow out (clicked points are always drawn). Neither -> []."""
     if points:
         shapes = _shapes_from_points(points, arrow_min)
     elif readout:
-        shapes = _shapes_from_readout(readout, arrow_min)
+        shapes = _shapes_from_readout(readout, arrow_min, collar)
     else:
         return []
     if color is not None:

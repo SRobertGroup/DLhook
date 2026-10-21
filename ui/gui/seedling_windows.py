@@ -2,11 +2,27 @@
 
 A mixin of seedling_measurement.Gui: the methods run on the Gui instance and use its state."""
 import tkinter as tk
+from tkinter import messagebox
 
 from ui.analysis_window import SeedlingAnalysisWindow
+from utils.review_queue import review_queue
 
 
 class SeedlingWindowsMixin:
+    def review_flagged_frames(self, quiet=False):
+        """Open the analysis window at the first frame of the review queue (spikes and flagged frames
+        of every analysed seedling, utils/review_queue.py); N / P there step through the rest.
+        Returns the queue length. `quiet` (after a batch analysis) skips the "nothing to review" box."""
+        queue = review_queue(self.frame_results_by_crop,
+                             include_unreadable=bool(getattr(self, "review_include_unreadable", False)))
+        if not queue:
+            if not quiet:
+                messagebox.showinfo("DLhook", "No frame left to review.", parent=self.root)
+            return 0
+        crop_id, frame, _ = queue[0]
+        self.open_seedling_frame(crop_id, frame)
+        return len(queue)
+
     def open_seedling_frame(self, crop_id, frame_index=None):
         """Open (or bring forward) the analysis window of seedling `crop_id` (0-based), showing
         `frame_index` when given -- used by the seedling picker and by clicking a point in the

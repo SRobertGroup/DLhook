@@ -17,6 +17,7 @@ from utils.landmark_temporal import describe_flag
 from utils.landmark_edits import edit_record, series_name_from_path, write_edit
 from utils.angle_annotation import parse_crop_filename
 from utils.paths import crop_path
+from utils.review_queue import next_in_queue, queue_position, review_queue
 from ui.zoomable_canvas import ZoomableImageCanvas
 
 # Overlay colors (hex). The raw crop is shown unmodified; the segmentation is only drawn as thin lines:
@@ -71,6 +72,9 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.show_hypo = tk.BooleanVar(value=True)
         self.show_germ = tk.BooleanVar(value=False)
         self.show_landmarks = tk.BooleanVar(value=True)
+        self.show_collar = tk.BooleanVar(value=True)
+        # Kept on the Gui, so the choice survives switching to another seedling's window.
+        self.review_unreadable_var = tk.BooleanVar(value=bool(getattr(gui, "review_include_unreadable", False)))
         self.save_edits_var = tk.BooleanVar(value=False)
         # frame index -> (junction/collar signature, midline or None); see _midline_for
         self._midline_cache = {}
@@ -118,6 +122,10 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             self.bind(f"<KeyPress-{key}>", lambda event: self._accept_reading())     # "Accept reading"
         for key in ("c", "C"):
             self.bind(f"<KeyPress-{key}>", lambda event: self._use_previous_collar())  # "Previous collar"
+        for key in ("n", "N"):
+            self.bind(f"<KeyPress-{key}>", lambda event: self._review_step(+1))       # next frame to review
+        for key in ("p", "P"):
+            self.bind(f"<KeyPress-{key}>", lambda event: self._review_step(-1))
 
         zoom_frame = tk.Frame(self)
         zoom_frame.grid(row=0, column=4, padx=4, pady=8, sticky="n")
@@ -143,6 +151,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         tk.Checkbutton(overlay_frame, text="Hypocotyl", variable=self.show_hypo,
                         command=self._render_current_frame).pack(side=tk.LEFT)
         tk.Checkbutton(overlay_frame, text="Landmarks", variable=self.show_landmarks,
+                        command=self._render_current_frame).pack(side=tk.LEFT)
+        tk.Checkbutton(overlay_frame, text="Collar", variable=self.show_collar,
                         command=self._render_current_frame).pack(side=tk.LEFT)
         # Only meaningful when a "4" (radicle) mask exists: hidden otherwise (see _render_current_frame)
         self.germ_check = tk.Checkbutton(overlay_frame, text="Germination", variable=self.show_germ,
@@ -206,6 +216,19 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.clear_germ_button.pack(side=tk.LEFT, padx=(4, 0))
         self.germ_label = tk.Label(germ_frame, text="")
         self.germ_label.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Review queue (utils/review_queue.py): spikes and flagged frames of every analysed seedling.
+        review_frame = tk.Frame(self)
+        review_frame.grid(row=7, column=0, columnspan=4, pady=(0, 8))
+        tk.Label(review_frame, text="To review:").pack(side=tk.LEFT)
+        tk.Button(review_frame, text="◀ Previous", width=10,
+                  command=lambda: self._review_step(-1)).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Button(review_frame, text="Next ▶", width=10,
+                  command=lambda: self._review_step(+1)).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Checkbutton(review_frame, text="Include unreadable", variable=self.review_unreadable_var,
+                       command=self._on_review_unreadable_toggle).pack(side=tk.LEFT, padx=(8, 0))
+        self.review_label = tk.Label(review_frame, text="", fg="#555555")
+        self.review_label.pack(side=tk.LEFT, padx=(8, 0))
 
     # --- Segmentation (background thread) -----------------------------
 
@@ -407,11 +430,50 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         target = self.crop_id + delta
         if not 0 <= target < n_seedlings:
             return
+        self._replace_with(target, self.current_frame)
+
+    def _replace_with(self, crop_id, frame):
+        """Open seedling `crop_id` at `frame` in this window's place (same geometry), closing this one."""
         geometry = self.geometry()
-        frame = self.current_frame
-        other = self.gui.open_seedling_frame(target, frame)
+        other = self.gui.open_seedling_frame(crop_id, frame)
         other.geometry(geometry)
         self.destroy()
+
+    # --- Review queue ------------------------------------------------------
+
+    def _review_queue(self):
+        return review_queue(self.gui.frame_results_by_crop,
+                            include_unreadable=bool(self.review_unreadable_var.get()))
+
+    def _on_review_unreadable_toggle(self):
+        self.gui.review_include_unreadable = bool(self.review_unreadable_var.get())
+        self._update_review_label()
+
+    def _review_step(self, step):
+        """Go to the next (step=+1) or previous (-1) frame to review, in this seedling or another one."""
+        if self._manual_mode:
+            return
+        item = next_in_queue(self._review_queue(), self.crop_id, self.current_frame, step)
+        if item is None:
+            self.status_label.configure(text="No more frames to review" if step > 0 else
+                                        "No earlier frame to review")
+            return
+        crop_id, frame, _ = item
+        if crop_id == self.crop_id:
+            self.show_frame(frame)
+        else:
+            self._replace_with(crop_id, frame)
+
+    def _update_review_label(self):
+        queue = self._review_queue()
+        k = queue_position(queue, self.crop_id, self.current_frame)
+        if not queue:
+            text = "nothing left to review"
+        elif k is None:
+            text = f"{len(queue)} frame(s) left  (N = next, P = previous)"
+        else:
+            text = f"{k + 1} of {len(queue)}: {queue[k][2]}  (N = next, P = previous)"
+        self.review_label.configure(text=text)
 
     def _session_result(self):
         """(result dict or None, error text or None) of the current clicks with the Overhook box."""
@@ -481,6 +543,10 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             messagebox.showwarning("Cannot compute angle", str(exc), parent=self)
             return
         self._commit_manual(result, manual)
+        # Done with this frame: leave click mode, unless edits are being collected for retraining
+        # (then the user is likely to correct frame after frame).
+        if self._manual_mode and not self.save_edits_var.get():
+            self._toggle_manual_angle_mode()
 
     def _accept_reading(self):
         """Keep the model's reading of this frame as shown -- also a grey (gated) or amber (flagged)
@@ -661,6 +727,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         result = self.frame_results[self.current_frame]
         self.frame_label.configure(text=f"{file_name} ({self.current_frame + 1}/{len(self.frame_results)})")
         self._update_germination_label()
+        self._update_review_label()
 
         if result is None:
             self.angle_label.configure(text="No mask/segmentation data for this frame.")
@@ -698,14 +765,24 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             manual = result.get("state_dict", {}).get(seed_id) == "Manual"
             gated = bool(readout and readout.get("gated") and not manual)
             flagged = bool(readout and readout.get("temporal_flag") and not manual and not gated)
-            shapes += landmark_shapes(readout=readout,
-                                      color=MUTED_COLOR if gated else FLAG_COLOR if flagged else None)
+            muted = gated or self._is_blanked(result, seed_id)      # no angle: the reading is not used
+            show_collar = self.show_collar.get()
+            shapes += landmark_shapes(readout=readout, collar=show_collar,
+                                      color=MUTED_COLOR if muted else FLAG_COLOR if flagged else None)
             collar_ref = readout.get("collar_ref") if readout else None
-            if flagged and collar_ref is not None:     # where the seedling's collar usually is
+            if flagged and show_collar and collar_ref is not None:     # where the seedling's collar usually is
                 shapes.append({"kind": "point", "xy": tuple(collar_ref), "color": FLAG_COLOR, "hollow": True})
         self.canvas.set_image(image, overlay=shapes)
 
         self.angle_label.configure(text=self._angle_text(result, seed_id, readout))
+
+    @staticmethod
+    def _is_blanked(result, seed_id):
+        """A frame blanked by hand: Manual with no angle (applied landmarks always give one)."""
+        if (result.get("state_dict") or {}).get(seed_id) != "Manual":
+            return False
+        angle = (result.get("angle_dict") or {}).get(seed_id)
+        return angle is None or not np.isfinite(angle)
 
     def _midline_for(self, file_name, result, readout):
         """Smoothed hypocotyl midline ((N, 2) x, y) of the current frame, on the mask the traits use
@@ -741,6 +818,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         else:
             source = result.get("angle_source", "ellipse")
         text += f"  |  source: {source}"
+        if source == "manual" and self._is_blanked(result, seed_id):
+            text += "\nblanked by hand -- place the landmarks to give it an angle"
         if readout and readout.get("peak") is not None and source == "landmarks":
             text += f" (peak {readout['peak']:.2f})"
         if source == "landmarks" and readout and readout.get("gated"):

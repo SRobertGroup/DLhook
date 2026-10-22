@@ -14,10 +14,11 @@ from utils.hypocotyl_traits import hypocotyl_midline, hypocotyl_traits, to_mm
 from utils.landmark_edit import (FLAG_COLOR, LandmarkClickSession, MUTED_COLOR, landmark_shapes,
                                  previous_collar, session_from_readout)
 from utils.landmark_temporal import describe_flag
-from utils.landmark_edits import edit_record, series_name_from_path, write_edit
+from utils.landmark_edits import edit_record, series_name_from_path, set_record_overhook, write_edit
 from utils.angle_annotation import parse_crop_filename
 from utils.paths import crop_path
 from utils.review_queue import next_in_queue, queue_position, review_queue
+from utils.hook_kinetics import MODELS as KINETICS_MODELS, curve
 from ui.zoomable_canvas import ZoomableImageCanvas
 
 # Overlay colors (hex). The raw crop is shown unmodified; the segmentation is only drawn as thin lines:
@@ -122,6 +123,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             self.bind(f"<KeyPress-{key}>", lambda event: self._accept_reading())     # "Accept reading"
         for key in ("c", "C"):
             self.bind(f"<KeyPress-{key}>", lambda event: self._use_previous_collar())  # "Previous collar"
+        for key in ("o", "O"):
+            self.bind(f"<KeyPress-{key}>", lambda event: self._on_overhook_key())      # apply / remove the overhook
         for key in ("n", "N"):
             self.bind(f"<KeyPress-{key}>", lambda event: self._review_step(+1))       # next frame to review
         for key in ("p", "P"):
@@ -176,7 +179,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
                                               command=lambda: self._switch_seedling(+1),
                                               state=tk.NORMAL if self.crop_id < n_seedlings - 1 else tk.DISABLED)
         self.next_seedling_button.pack(side=tk.LEFT, padx=4)
-        tk.Label(nav_frame, text="(← → frames, ↑ ↓ seedlings, Del blanks the frame)", fg="#555555").pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(nav_frame, text="(← → frames, ↑ ↓ seedlings, O overhook, N / P next / previous to review, Del blanks the frame)", fg="#555555").pack(side=tk.LEFT, padx=(8, 0))
 
         self.angle_label = tk.Label(self, text="")
         self.angle_label.grid(row=4, column=0, columnspan=4, pady=4)
@@ -185,7 +188,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         manual_frame.grid(row=5, column=0, columnspan=4, pady=(0, 8))
         tk.Label(manual_frame, text="Manual landmarks:").pack(side=tk.LEFT)
         tk.Checkbutton(manual_frame, text="Overhook", variable=self.overhook_var,
-                       command=self._render_current_frame).pack(side=tk.LEFT)
+                       command=self._on_overhook_toggled).pack(side=tk.LEFT)
         self.place_angle_button = tk.Button(manual_frame, text="Place landmarks", width=14,
                                              command=self._toggle_manual_angle_mode)
         self.place_angle_button.pack(side=tk.LEFT, padx=(8, 0))
@@ -229,6 +232,19 @@ class SeedlingAnalysisWindow(tk.Toplevel):
                        command=self._on_review_unreadable_toggle).pack(side=tk.LEFT, padx=(8, 0))
         self.review_label = tk.Label(review_frame, text="", fg="#555555")
         self.review_label.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Hook kinetics (utils/hook_kinetics.py): the seedling's fitted curve; "auto" = chosen by BIC.
+        kinetics_frame = tk.Frame(self)
+        kinetics_frame.grid(row=8, column=0, columnspan=4, pady=(0, 8))
+        tk.Label(kinetics_frame, text="Kinetics fit:").pack(side=tk.LEFT)
+        forced = (getattr(self.gui, "kinetics_models", None) or {}).get(self.crop_id)
+        self.kinetics_var = tk.StringVar(value=forced or "auto")
+        self.kinetics_box = ttk.Combobox(kinetics_frame, textvariable=self.kinetics_var, width=9, state="readonly",
+                                         values=("auto",) + KINETICS_MODELS)
+        self.kinetics_box.pack(side=tk.LEFT, padx=(8, 0))
+        self.kinetics_box.bind("<<ComboboxSelected>>", lambda event: self._on_kinetics_model())
+        self.kinetics_label = tk.Label(kinetics_frame, text="", fg="#555555")
+        self.kinetics_label.pack(side=tk.LEFT, padx=(8, 0))
 
     # --- Segmentation (background thread) -----------------------------
 
@@ -439,6 +455,46 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         other.geometry(geometry)
         self.destroy()
 
+    # --- Hook kinetics ----------------------------------------------------
+
+    def _on_kinetics_model(self):
+        """Force a kinetics model for this seedling ("auto" = back to the BIC choice); the plot redraws."""
+        models = self.gui.__dict__.setdefault("kinetics_models", {})
+        choice = self.kinetics_var.get()
+        if choice == "auto":
+            models.pop(self.crop_id, None)
+        else:
+            models[self.crop_id] = choice
+        self._render_current_frame()
+        self._results_changed()
+
+    def _update_kinetics_label(self):
+        """The fitted model, its phase times and the fitted angle at this frame (descriptive only)."""
+        kinetics = getattr(self.gui, "kinetics_for_crop", None)
+        if kinetics is None:
+            self.kinetics_label.configure(text="")
+            return
+        fit, axis, unit, _ = kinetics(self.crop_id)
+        if fit is None:
+            self.kinetics_label.configure(text="not enough readable frames")
+            return
+        tr = fit["traits"]
+        u = "h" if unit == "h" else " frames"
+        parts = [f"{fit['model']}{' (forced)' if fit['forced'] else ''}"]
+        if "closing_mid" in tr:
+            parts.append(f"closing {tr['closing_start']:.0f}-{tr['closing_end']:.0f}{u}")
+        if "maintenance_duration" in tr:
+            parts.append(f"maintenance {tr['maintenance_duration']:.0f}{u}")
+        if "opening_mid" in tr:
+            parts.append(f"opening {tr['opening_start']:.0f}-{tr['opening_end']:.0f}{u}")
+        i = self.current_frame
+        if i < len(axis) and np.isfinite(axis[i]) and fit["t_first"] <= axis[i] <= fit["t_last"]:
+            value = float(curve(fit["model"], fit["params"], [axis[i]])[0])
+            parts.append(f"fitted {value:.0f}° here")
+        if tr.get("extrapolated"):
+            parts.append(f"beyond the series: {tr['extrapolated'].replace(',', ', ')}")
+        self.kinetics_label.configure(text="  |  ".join(parts))
+
     # --- Review queue ------------------------------------------------------
 
     def _review_queue(self):
@@ -548,36 +604,104 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         if self._manual_mode and not self.save_edits_var.get():
             self._toggle_manual_angle_mode()
 
-    def _accept_reading(self):
-        """Keep the model's reading of this frame as shown -- also a grey (gated) or amber (flagged)
-        one -- as a Manual frame, with the model's angle (180 - theta). Same commit as Apply landmarks."""
-        if not self.frame_results or self._manual_mode:
+    # --- Overhook on a reading ---------------------------------------------
+
+    @staticmethod
+    def _overhook_applied(result, seed_id):
+        """True when this frame's angle is 180 + theta: a Manual reading committed with the overhook.
+        The model's own overhook flag (`readout["overhook"]`) is only a suggestion until it is applied."""
+        readout = (result.get("landmarks") or {}).get(seed_id)
+        return bool(readout and (result.get("state_dict") or {}).get(seed_id) == "Manual"
+                    and readout.get("edit") == "manual" and readout.get("overhook"))
+
+    def _on_overhook_key(self):
+        """O: while placing landmarks, tick / untick Overhook; otherwise apply the overhook to this
+        frame's reading (angle = 180 + theta), or remove it when it is applied."""
+        if self._manual_mode:
+            self.overhook_var.set(0 if self.overhook_var.get() else 1)
+            self._render_current_frame()
+            return
+        if not self.frame_results or self.frame_results[self.current_frame] is None:
             return
         result = self.frame_results[self.current_frame]
+        self._set_overhook(not self._overhook_applied(result, self._current_seed_id()))
+        self._render_current_frame()       # also puts the Overhook box back in line with the frame
+
+    def _on_overhook_toggled(self):
+        """The Overhook box was clicked: while placing landmarks it only re-draws the prompt; otherwise
+        it applies / removes the overhook on this frame's reading."""
+        if not self._manual_mode:
+            self._set_overhook(bool(self.overhook_var.get()))
+        self._render_current_frame()
+
+    def _set_overhook(self, flag):
+        """Keep this frame's landmark reading and set whether the overhook is applied to its angle
+        (180 + theta when `flag`, else 180 - theta). A model reading becomes a Manual one, like
+        `_accept_reading`; an already Manual reading is changed in place. False when nothing was done."""
+        result = self.frame_results[self.current_frame] if self.frame_results else None
+        if result is None or self._manual_mode:
+            return False
+        seed_id = self._current_seed_id()
+        readout = (result.get("landmarks") or {}).get(seed_id)
+        if not readout or readout.get("junction") is None:
+            self.status_label.configure(text="No reading on this frame -- place the landmarks")
+            return False
+        if (result.get("state_dict") or {}).get(seed_id) != "Manual":
+            if not flag:
+                return True                  # the model reading already has no overhook applied
+            return self._accept_reading(overhook=True)
+        if readout.get("edit") != "manual":
+            self.status_label.configure(text="Frame blanked -- place the landmarks to give it an angle")
+            return False
+        if bool(readout.get("overhook")) == bool(flag):
+            return True
+        theta = float(readout["theta"])
+        readout["overhook"] = bool(flag)
+        readout["bio"] = 180.0 + theta if flag else 180.0 - theta
+        result["angle_dict"][seed_id] = readout["bio"]
+        self._sync_angle_list(result)
+        if self.save_edits_var.get():
+            directory = getattr(self.gui, "landmark_edits_dir", None)
+            if directory:
+                series, _ = self._source_frame_for(self.cropped_filenames[self.current_frame])
+                set_record_overhook(directory, series, self.cropped_filenames[self.current_frame], flag)
+        self.gui._reconstruct_series_for_crop(self.crop_id)
+        self._results_changed()
+        self.status_label.configure(text="Overhook applied" if flag else "Overhook removed")
+        return True
+
+    def _accept_reading(self, overhook=False):
+        """Keep the model's reading of this frame as shown -- also a grey (gated) or amber (flagged)
+        one -- as a Manual frame, with the model's angle (180 - theta; 180 + theta with `overhook`).
+        Same commit as Apply landmarks. True when the reading was committed."""
+        if not self.frame_results or self._manual_mode:
+            return False
+        result = self.frame_results[self.current_frame]
         if result is None:
-            return
+            return False
         seed_id = self._current_seed_id()
         if (result.get("state_dict") or {}).get(seed_id) == "Manual":
             self.status_label.configure(text="Already manual")
-            return
+            return False
         readout = (result.get("landmarks") or {}).get(seed_id)
         session = session_from_readout(readout)
         if session is None:
             self.status_label.configure(text="No model reading to accept -- place the landmarks")
-            return
+            return False
         try:
-            manual = session.result(overhook=False)
+            manual = session.result(overhook=bool(overhook))
         except ValueError as exc:
             messagebox.showwarning("Cannot accept reading", str(exc), parent=self)
-            return
+            return False
         # Keep exactly the theta the window showed (a gated frame keeps it as gated_theta).
         shown = readout.get("gated_theta", readout.get("theta")) if readout.get("gated") else readout.get("theta")
         if shown is not None and np.isfinite(shown):
             manual["theta"] = float(shown)
-            manual["bio"] = 180.0 - float(shown)
+            manual["bio"] = 180.0 + float(shown) if overhook else 180.0 - float(shown)
         manual["accepted"] = True          # a model reading the user confirmed, not clicked
         self._commit_manual(result, manual)
-        self.status_label.configure(text="Reading accepted")
+        self.status_label.configure(text="Reading accepted with the overhook" if overhook else "Reading accepted")
+        return True
 
     def _use_previous_collar(self):
         """Give this frame the collar of the nearest earlier frame whose collar is trusted (Manual, or
@@ -728,6 +852,7 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self.frame_label.configure(text=f"{file_name} ({self.current_frame + 1}/{len(self.frame_results)})")
         self._update_germination_label()
         self._update_review_label()
+        self._update_kinetics_label()
 
         if result is None:
             self.angle_label.configure(text="No mask/segmentation data for this frame.")
@@ -746,6 +871,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         image = cv2.imread(crop_path(file_name), cv2.IMREAD_COLOR)
         seed_id = self._current_seed_id()
         readout = (result.get("landmarks") or {}).get(seed_id)
+        if not self._manual_mode:       # outside click mode the box shows whether the overhook is applied here
+            self.overhook_var.set(int(self._overhook_applied(result, seed_id)))
 
         shapes = []
         if self.show_cotyl.get():
@@ -803,6 +930,24 @@ class SeedlingAnalysisWindow(tk.Toplevel):
         self._midline_cache[self.current_frame] = (signature, midline)
         return midline
 
+    def _overhook_text(self, result, seed_id, readout):
+        """One line saying whether the overhook is part of this frame's angle (180 + theta) or not
+        (180 - theta), and what O would do. Empty when the frame has no angle to apply it to."""
+        if self._manual_mode or not readout or readout.get("junction") is None:
+            return ""
+        theta = readout.get("theta")
+        manual = (result.get("state_dict") or {}).get(seed_id) == "Manual"
+        if theta is None or not np.isfinite(theta) or self._is_blanked(result, seed_id):
+            return ""
+        if readout.get("gated") and not manual:
+            return ""
+        closed, over = 180.0 - theta, 180.0 + theta
+        if self._overhook_applied(result, seed_id):
+            return f"\noverhook applied: angle = 180 + θ = {over:.0f}°  (O removes it: {closed:.0f}°)"
+        suggested = bool(readout.get("overhook")) and not manual
+        lead = "the model suggests an overhook, not applied" if suggested else "overhook not applied"
+        return f"\n{lead}: angle = 180 − θ = {closed:.0f}°  (O applies it: {over:.0f}°)"
+
     def _angle_text(self, result, seed_id, readout):
         angle_dict = result["angle_dict"]
         if angle_dict:
@@ -838,6 +983,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             text += ("\n⚠ " + describe_flag(readout["temporal_flag"], readout.get("temporal_collar_dev"))
                      + " -- A accepts, C takes the previous collar, Del blanks")
 
+        text += self._overhook_text(result, seed_id, readout)
+
         traits = (result.get("traits") or {}).get(seed_id)
         if traits and isinstance(traits.get("length_px"), (int, float)) and not np.isnan(traits["length_px"]):
             mm = to_mm(traits, getattr(self.gui, "scale_um_per_px", None))
@@ -854,7 +1001,8 @@ class SeedlingAnalysisWindow(tk.Toplevel):
             text += "\nlandmarks: " + self._session.prompt()
             if manual is not None:
                 text += (f"   |   theta {manual['theta']:.1f}\u00b0, bio {manual['bio']:.1f}\u00b0"
-                         f"{'  (overhook)' if manual['overhook'] else ''}  (Apply landmarks to commit)")
+                         f"{'  (overhook applied: 180 + theta)' if manual['overhook'] else '  (no overhook: 180 - theta)'}"
+                         "  (Apply landmarks to commit)")
             elif error:
                 text += f"   |   {error}"
             text += "\n[Backspace = undo point, Esc = reset, Enter = apply (collar/root optional)]"

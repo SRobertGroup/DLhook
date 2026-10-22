@@ -12,7 +12,7 @@ import pytest
 import seedling_measurement as sm
 from models import segmentation_backends
 from seedling_measurement import Gui
-from utils.export_rows import BASE_COLUMNS, LANDMARK_COLUMNS, TRAIT_COLUMNS, MM_COLUMNS, export_columns, build_export_row
+from utils.export_rows import BASE_COLUMNS, KINETICS_COLUMNS, LANDMARK_COLUMNS, TRAIT_COLUMNS, MM_COLUMNS, export_columns, build_export_row
 from utils.germination_detector import GerminationDetector
 from utils.mask_store import MaskStore
 
@@ -321,8 +321,8 @@ def test_export_columns_old_first_and_mm_only_with_scale():
     base = export_columns(None)
     assert base[:7] == BASE_COLUMNS == ['img_name', 'seedling_id', 'raw_angle', 'state', 'bio_angle',
                                         'time_elapsed_min', 'germination_frame']
-    assert base[7:] == LANDMARK_COLUMNS + TRAIT_COLUMNS
-    assert base[7] == 'angle_source' and base[-1] == 'hypocotyl_diameter_px'
+    assert base[7:] == LANDMARK_COLUMNS + TRAIT_COLUMNS + KINETICS_COLUMNS
+    assert base[7] == 'angle_source' and base[-1] == 'fit_angle'
     assert not set(MM_COLUMNS) & set(base)
     assert export_columns(10.0) == base + MM_COLUMNS
 

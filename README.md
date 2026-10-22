@@ -152,7 +152,7 @@ DLHOOK_ANGLE_SOURCE=ellipse python main.py     # legacy ellipse method
 DLHOOK_LANDMARK_GATE=0 python main.py          # keep every landmark reading (no readability gate)
 ```
 
-On the final BerryBox v2 validation set (287 hand-measured frames, plants no model had seen) the landmark ensemble has a mean error of **13.5°** (median **7.0°**; 13.9° for the previous members, not a significant difference), against **26.8°** for the ellipse pipeline; repeating your own measurement by hand differs by **4.2°** on average. The landmark angle is a folded angle, `180 - theta`; the automatic overhook flag is exported separately and does not change `bio_angle`. Landmarks are read from the plain crop, so they need no segmentation mask: an angle exists even where a mask is empty.
+On the BerryBox v2 test set (six image series, Camera_2 to Camera_5 and Plates 2 and 3: 326 hand-measured frames of 81 plants no model had seen) the landmark ensemble has a mean error of **15.0°** (median **6.9°**). On the 287 frames of the first five series, the ellipse pipeline's error is **26.8°**. Repeating a measurement by hand differs by **4.2°** on average (5.0° between two blind passes over dense series). The landmark angle is a folded angle, `180 - theta`; the automatic overhook flag is exported separately and does not change `bio_angle`. Landmarks are read from the plain crop, so they need no segmentation mask: an angle exists even where a mask is empty.
 
 **Readability gate.** The ensemble reads an angle on every frame, including frames with no usable information (the ones an annotator would skip). A gate rejects such frames:
 
@@ -160,7 +160,7 @@ On the final BerryBox v2 validation set (287 hand-measured frames, plants no mod
 - the analysis window still shows the rejected reading, in grey, and placing the landmarks by hand overrides the gate;
 - `DLHOOK_LANDMARK_GATE=0` disables it (every frame keeps its reading; `unreadable_p` is still exported).
 
-The gate is a learned **measurable** output of the landmark networks: an image-level head trained on the frames annotators measured and the ones they skipped (`measurable_p` is exported). On BerryBox v2 it rejects 76% of the skipped frames while keeping 99% of the measured ones. With the previous landmark weights, which lack that output, the gate is a logistic rule on the junction peak, the cotyledon-tip peak and the disagreement between the three networks (68% rejected, 99% kept).
+The gate is a learned **measurable** output of the landmark networks: an image-level head trained on the frames annotators measured and the ones they skipped (`measurable_p` is exported). On BerryBox v2 it rejects 76% of the skipped frames while keeping 98% of the measured ones. With the previous landmark weights, which lack that output, the gate is a logistic rule on the junction peak, the cotyledon-tip peak and the disagreement between the three networks (68% rejected, 99% kept).
 
 **Series filter.** Single readings jump: about 13% of per-frame readings sit more than 20° away from their neighbours, mostly for 1 to 3 frames (a cotyledon axis read the wrong way round, for instance). Each seedling's series is therefore cleaned before states are assigned:
 
@@ -169,7 +169,7 @@ The gate is a learned **measurable** output of the landmark networks: an image-l
 - frames you set by hand are never changed, and they anchor their neighbours;
 - `raw_angle` keeps the model's reading and `series_edit` says what the filter did (`rejected` / `interpolated`); the analysis window names a rejected reading, and `A` accepts it.
 
-The settings were chosen on dense hand-measured series of 9 BerryBox v2 seedlings (every frame measured) and tested on 7 other dense series and on 57 other plants measured sparsely. The mean error fell from 17.0° to 13.5° and from 14.3° to 12.1° on these two test sets, and the share of frames off by more than 20° from 20% to 15% and from 17% to 15%. Readings far from their neighbours dropped from 13% to 3% of frames (`python -m multi.tune_series`, `python -m multi.evaluate_series`).
+The settings were chosen on dense hand-measured series of 9 BerryBox v2 seedlings (every frame measured) and tested on 7 other dense series and on 67 other plants measured sparsely. The mean error fell from 14.9° to 14.3° and from 16.7° to 13.6° on these two test sets, and the share of frames off by more than 20° from 18% to 16% and from 17% to 15%. Readings far from their neighbours dropped from 13% to 3% of frames (`python -m multi.tune_series`, `python -m multi.evaluate_series`).
 
 **Time-series checks.** Two facts of a growing seedling are checked across each seedling's frames:
 
@@ -316,12 +316,13 @@ The raw image is shown at full intensity; the overlays are thin lines only, so y
 
 ![Placing landmarks by hand: the angle is complete after C2, the prompt offers the optional collar](docs/img/workflow/10_manual_landmarks.png)
 
-The prompt in the status line names the next click. The angle is complete after C2; `Enter` applies the landmarks (the two optional points can be left out), `BackSpace` undoes the last point and `Escape` resets. Anywhere in the window, `←` / `→` step through the frames and `↑` / `↓` (or the `▲ Seedling` / `Seedling ▼` buttons) open the previous / next seedling at the same frame, in the same place on screen. Once C2 is placed, the `Overhook` box is **ticked automatically** when the cotyledon ray crosses the hypocotyl ray (the same test as for the model's reading); you can still tick or untick it. `Apply landmarks` commits the frame as **Manual** (an overhooked hook is stored as `180 + theta`, otherwise `180 - theta`), recomputes the hypocotyl traits with your collar (or the model's) and re-reconstructs the series around your frame. Applying also leaves click mode, so arrows and the other keys work again at once; with `Save edits for retraining` ticked, click mode stays on for the next correction. Two shortcuts avoid re-clicking a reading that is nearly right:
+The prompt in the status line names the next click. The angle is complete after C2; `Enter` applies the landmarks (the two optional points can be left out), `BackSpace` undoes the last point and `Escape` resets. Anywhere in the window, `←` / `→` step through the frames and `↑` / `↓` (or the `▲ Seedling` / `Seedling ▼` buttons) open the previous / next seedling at the same frame, in the same place on screen. Once C2 is placed, the `Overhook` box is **ticked automatically** when the cotyledon ray crosses the hypocotyl ray (the same test as for the model's reading); you can still tick or untick it. `Apply landmarks` commits the frame as **Manual** (an overhooked hook is stored as `180 + theta`, otherwise `180 - theta`), recomputes the hypocotyl traits with your collar (or the model's) and re-reconstructs the series around your frame. Applying also leaves click mode, so arrows and the other keys work again at once; with `Save edits for retraining` ticked, click mode stays on for the next correction. Three shortcuts avoid re-clicking a reading that is nearly right:
 
 - **`Accept reading`** (`A`) keeps the model's reading as shown, also a grey one the gate rejected or an amber one a time-series check flagged, and commits it as **Manual** with the model's angle. Use it when the landmarks are right but the frame was greyed out or flagged.
 - **`Previous collar`** (`C`) gives this frame the collar of the nearest earlier frame whose collar can be trusted (a Manual frame, or a readable one without a collar flag). The angle is unchanged; the hypocotyl length and the time-series flags follow the new collar. Use it when only the collar jumped.
+- **`O`** (the `Overhook` box does the same) keeps the model's landmarks and applies the overhook to the angle (`180 + theta`); press it again to remove it. The line under the angle always says which one is in force: *overhook applied*, *overhook not applied*, or *the model suggests an overhook, not applied* when the cotyledon ray crosses the hypocotyl ray, with the angle each choice gives. The box follows the frame you are on. While you place landmarks, `O` only ticks or unticks the box.
 
-Both count as edits: the kinematics plot redraws, and with `Save edits for retraining` ticked an accepted reading is saved as a training record.
+All three count as edits: the kinematics plot redraws, and with `Save edits for retraining` ticked an accepted reading is saved as a training record.
 
 `Blank this frame` discards the frame's measurement entirely — use it when the seedling has rotated so the cotyledon sits in front of or behind the hypocotyl, since a 2D image cannot yield a correct angle in that case. A blanked frame's reading stays drawn in grey, like a frame the gate set aside; placing landmarks on it gives it an angle again.
 
@@ -346,7 +347,18 @@ Plots angle against time for all seedlings at once. Time is measured **since ger
 
 The legend gives the **State** (marker colour: Closed, Opening, Manual, Unclassified); a black ring marks a **temporal flag**. `Unreadable` frames have no angle and are not plotted. Each seedling has its own line colour; clicking a point opens that seedling at that frame. A **dashed** line means no germination frame was found for that seedling, so its time axis is not aligned to the others. The grey horizontal line marks 180° — a fully closed hook.
 
-The plot redraws by itself when you change a seedling in its analysis window (applied landmarks, a blanked frame, a germination frame, a re-segmentation). Click `Refresh` after a new *Start Analysis* or *Export results* run. Opening it again brings the same window to the front.
+**Fitted curves.** With `Fitted curves` ticked (the default), each seedling also gets a thicker line in its own colour: a curve fitted to its angles from germination on, which describes the closing, the maintenance and the opening of the hook. Four shapes are fitted, and the simplest one the data support is kept (by BIC):
+
+| Shape | When it is chosen |
+|---|---|
+| double (closing, then opening) | the hook forms, stays closed, then opens |
+| opening only | the hook is already closed when first seen |
+| closing only | the hook closes and does not open within the series |
+| flat | no transition |
+
+The fit uses the filtered angles, gives Manual frames double weight and is robust to a remaining run of misread frames. It is **descriptive only**: it never changes `bio_angle`, the states or the filter. In a seedling's analysis window, the `Kinetics fit:` row shows the chosen shape, the phase times and the fitted angle at the current frame, and lets you force a shape (`auto` returns to the automatic choice).
+
+The plot redraws by itself when you change a seedling in its analysis window (applied landmarks, a blanked frame, a germination frame, a re-segmentation, a forced kinetics shape). Click `Refresh` after a new *Start Analysis* or *Export results* run. Opening it again brings the same window to the front.
 
 
 ![Kinematics window](docs/img/workflow/11_kinematics.png)
@@ -408,11 +420,19 @@ The exported CSV is in **long format** — one row per seedling per frame. The f
 | `hypocotyl_length_truncated` | `True` when there is no collar and the midline touches the crop border, so the length is a lower bound |
 | `hypocotyl_curvature_mean`, `hypocotyl_curvature_max` | mean and maximum of the absolute curvature \|κ\| of the smoothed midline, in 1/px (the first and last 5 px are dropped). **Experimental, not validated:** it reads about twice a coarse hand estimate (11 clicks per hypocotyl), which cannot tell the pipeline's error from the reference's |
 | `hypocotyl_diameter_px` | diameter in pixels: the median width of transects perpendicular to the midline, taken every 5 px along its inner 80% |
+| `fit_angle` | the seedling's fitted kinetics curve at this frame (see *Fitted curves* in step 5); empty before germination and outside the fitted span |
+
+**Kinetics file.** Next to the CSV, `<name>_kinetics.csv` holds one row per seedling: the chosen shape (`model`, `forced` when you set it by hand), the number of frames used, the time unit (`h` since germination, or `frame` without timestamps) and the germination frame it counts from, then the phase times and durations:
+
+- `closing_start`, `closing_mid`, `closing_end`, `closing_duration` and the same four for the opening. A phase starts and ends at 10% and 90% of its change.
+- `maintenance_duration`: from the end of closing to the start of opening. It is **negative** when the two overlap, i.e. the hook starts opening before it has fully closed.
+- `peak_time`, `peak_angle`: the highest point of the fitted curve. It is lower than the closed plateau when the phases overlap.
+- `extrapolated`: the phase limits that fall outside the observed frames, for example `opening_end` for a hook still opening at the last frame. Treat those values as estimates.
 
 **Millimetre columns**, written only when a scale is set: `hypocotyl_length_mm`, `hypocotyl_diameter_mm`, `hypocotyl_curvature_mean_per_mm`, `hypocotyl_curvature_max_per_mm`. The pixel columns are always written.
 
 > [!NOTE]
-> The hypocotyl traits are **not yet validated** against hand measurements. Treat absolute values with care until they have been compared with manual length and diameter readings.
+> Hypocotyl length and diameter are validated against hand measurements; curvature is experimental (see [Measuring the hypocotyl traits by hand](#measuring-the-hypocotyl-traits-by-hand) and the limitations below).
 
 ```csv
 img_name,seedling_id,raw_angle,state,bio_angle,time_elapsed_min,germination_frame,angle_source,landmark_edit,landmark_peak,overhook_flag,unreadable_p,unreadable,measurable_p,temporal_flag,junction_x,junction_y,...
@@ -497,10 +517,10 @@ python -m multi.assess_seg_v2 --score-strokes weights/multiclass/dlhook_4class_v
 
 ![Trait annotator](docs/img/workflow/tool_trait_annotator.png)
 
-**Result on 201 BerryBox v2 frames (63 plants, 15 October 2026).**
-- **Length is reliable.** With the junction and collar placed by hand, it is off by 3.5 px on average on a median of 181 px (r = 1.00). With the landmark model's junction and collar, as exported, the error is 9.8 px.
+**Result on 200 BerryBox v2 frames.**
+- **Length is reliable.** With the junction and collar placed by hand, it is off by 3.5 px on average on a median of 182 px (r = 1.00). With the landmark model's junction and collar, as exported, the error is 9.8 px.
 - **Diameter is reliable since the fix.** It read about 2 px too wide (the mask runs about 1 px past each edge), so the transects are now measured on the mask shrunk by 1 px. The error is now 0.5 px on a hand median of 4.9 px (bias −0.3 px, r = 0.69).
-- **Curvature is not validated.** It reads about twice the hand value, but the hand value is only a rough estimate: a median of 11 clicks along a 181 px hypocotyl smooths out the bends. The two rank seedlings the same way (r ≈ 0.8).
+- **Curvature is not validated.** It reads about twice the hand value, but the hand value is only a rough estimate: a median of 11 clicks along a 182 px hypocotyl smooths out the bends. The two rank seedlings the same way (r ≈ 0.8).
 
 ```bash
 python -m ui.trait_annotator                                   # BerryBox v2 val (no model trained on it), frames with a clicked junction and collar
@@ -615,12 +635,12 @@ pytest
 
 DLhook v0.3.0 is a **pre-release**. It is usable and in active development, but the following are known and unresolved:
 
-- **Germination time zero is approximate.** On 73 BerryBox v2 seedlings (a rig the detector was never fitted on) the onset is exact on 49% and within one crop step on 74%, but some series read early (Camera_2) or late (Camera_3). Check time zero in the analysis window for your own material.
+- **Germination time zero is approximate.** On 83 BerryBox v2 seedlings (a rig the detector was never fitted on) the onset is exact on 43% and within one frame on 72%; misses are more often late (34 seedlings) than early (13). Check time zero in the analysis window for your own material.
 - **Super-resolution is opt-in and adds a tiny fraction of detail** (`DLHOOK_SUPERRES=1`, CUDA only). The 4× output is immediately resampled back to native size, so there is nothing extra to zoom into.
-- **Hypocotyl curvature is experimental.** Length and diameter are validated against hand measurements (201 BerryBox v2 frames: length within 3.5 px with the hand junction and collar, 9.8 px with the model's; diameter within 0.5 px); curvature is not (see the output table).
-- **The angle has been tested on new plants, not on a new rig.** Every test plant (BerryBox v2: 13.5° mean error; round5: 27.0°; pooled 15.8°, median 6.9°) comes from a camera setup the models were trained on. Expect a larger error on a very different setup, and check a few frames by hand.
-- **Open and young hooks are the weak cases.** Open hooks are read about 9° too closed and closed or overhooked ones about 8° too open; on tight young hooks the model sometimes reads the cotyledon axis reversed (about 180° off), which the series filter removes only when it lasts a few frames.
-- **One annotator.** All hand measurements behind these numbers come from one person; their repeat error is about 4°.
+- **Hypocotyl curvature is experimental.** Length and diameter are validated against hand measurements (200 BerryBox v2 frames: length within 3.5 px with the hand junction and collar, 9.8 px with the model's; diameter within 0.5 px); curvature is not (see the output table).
+- **The angle has been tested on new plants, not on a new rig.** Every test plant (BerryBox v2: 15.0° mean error; round5: 27.0°; pooled 16.8°, median 6.9°) comes from a camera setup the models were trained on. Expect a larger error on a very different setup, and check a few frames by hand.
+- **Open and young hooks are the weak cases.** Open hooks are read about 12° too closed and closed or overhooked ones about 9° too open; on tight young hooks the model sometimes reads the cotyledon axis mirrored (23 of the 38 readings off by more than 30°), which the series filter removes only when it lasts a few frames.
+- **One annotator.** All hand measurements behind these numbers come from one person; their repeat error is about 4 to 5°.
 - **The angle is slow on CPU.** Each frame costs three landmark networks with flip averaging (six forward passes).
 - **The time-series thresholds were set on annotated series** (15 px collar jump, 5 px junction drop). Very different magnifications may need other values (`utils/landmark_temporal.py`).
 - **GPU and CPU results are not bit-identical** — roughly 1 pixel in 86,000 (0.001%) can differ.
@@ -639,6 +659,6 @@ The segmentation network architecture and the trained weights derive from [RootP
 
 Please cite this repository while we work on the manuscript describing the method (see also [`CITATION.cff`](CITATION.cff)):
 
-> David Radianu, Sara Raggi, Siamsa Doyle, Hemamshu Ratnakaram, Sandeep Yadav, Stéphanie Robert\*, Adrien Heymans\* (2025). DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings. v0.3.0.
+> David Radianu, Sara Raggi, Sandeep Yadav, Hemamshu Ratnakaram, Siamsa Doyle, Stéphanie Robert\*, Adrien Heymans\* (2025). DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsis thaliana seedlings. v0.3.0.
 
 Pre-trained weights: Radianu D, Raggi S, Yadav S, Ratnakaram H, Doyle S, Robert S, Heymans A (2026). DLhook pre-trained weights v1.0. Zenodo. [doi:10.5281/zenodo.23531884](https://doi.org/10.5281/zenodo.23531884).

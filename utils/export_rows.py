@@ -2,7 +2,8 @@
 
 The first seven columns are the original schema and keep their order and formatting; the landmark /
 hypocotyl-trait columns (incl. unreadable_p / unreadable / measurable_p, the landmark readability gate, and
-temporal_flag / collar_ref_*, the time-series checks) are appended after them, and the millimetre columns only when a scale is set.
+temporal_flag / collar_ref_*, the time-series checks) are appended after them, then fit_angle (the seedling's fitted
+kinetics curve, utils/hook_kinetics.py; descriptive only), and the millimetre columns only when a scale is set.
 Missing values are empty cells.
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ LANDMARK_COLUMNS = ['angle_source', 'landmark_edit', 'landmark_peak', 'overhook_
                     'collar_ref_x', 'collar_ref_y', 'root_dir_x', 'root_dir_y']
 TRAIT_COLUMNS = ['hypocotyl_length_px', 'hypocotyl_length_truncated', 'hypocotyl_curvature_mean',
                  'hypocotyl_curvature_max', 'hypocotyl_diameter_px']
+KINETICS_COLUMNS = ['fit_angle']
 MM_COLUMNS = ['hypocotyl_length_mm', 'hypocotyl_diameter_mm',
               'hypocotyl_curvature_mean_per_mm', 'hypocotyl_curvature_max_per_mm']
 
@@ -33,8 +35,8 @@ _POINT_COLUMNS = [('junction', 'junction_x', 'junction_y'), ('hypo_dir', 'hypo_d
 
 
 def export_columns(um_per_px=None):
-    """Column order of the export: original columns first, then landmarks and traits, then mm."""
-    cols = BASE_COLUMNS + LANDMARK_COLUMNS + TRAIT_COLUMNS
+    """Column order of the export: original columns first, then landmarks, traits and the fitted angle, then mm."""
+    cols = BASE_COLUMNS + LANDMARK_COLUMNS + TRAIT_COLUMNS + KINETICS_COLUMNS
     return cols + MM_COLUMNS if um_per_px else cols
 
 
@@ -46,9 +48,10 @@ def _cell(v, ndigits=4):
     return round(float(v), ndigits) if _is_num(v) else ''
 
 
-def build_export_row(filename, seed_id, result, elapsed, germ_frame, um_per_px=None):
+def build_export_row(filename, seed_id, result, elapsed, germ_frame, um_per_px=None, fit_angle=None):
     """One CSV row (dict keyed by export_columns(um_per_px)) for a seedling in one frame.
-    `result` is a process_single_frame result dict, or None for a frame with no result."""
+    `result` is a process_single_frame result dict, or None for a frame with no result; `fit_angle` the
+    seedling's fitted kinetics curve at this frame (None outside the fitted span)."""
     angle = result["angle_dict"].get(seed_id) if result else None
     raw = result.get("raw_angle_dict", {}).get(seed_id, angle) if result else None
     row = {
@@ -61,6 +64,7 @@ def build_export_row(filename, seed_id, result, elapsed, germ_frame, um_per_px=N
         'germination_frame': germ_frame if germ_frame is not None else '',
     }
     row.update({c: '' for c in LANDMARK_COLUMNS + TRAIT_COLUMNS})
+    row['fit_angle'] = _cell(fit_angle, 1)
     if um_per_px:
         row.update({c: '' for c in MM_COLUMNS})
     if not result:

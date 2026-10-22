@@ -363,6 +363,8 @@ class Gui(CropBoxMixin, ScaleMixin, ExportMixin, SeedlingWindowsMixin):
         self.cropped_filenames_by_crop = {}
         self.mask_store.clear()
         self.germination_detector = None
+        self.kinetics_models = {}               # per-seedling forced kinetics model (analysis window)
+        self._kinetics_cache = {}
         self.reset_frame_accumulators()         # contour histories and landmark_store
         self._update_button_states()
 

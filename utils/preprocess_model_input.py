@@ -114,11 +114,39 @@ def get_capture_time(path):
     return min(embedded) if embedded else None
 
 
+_DIGIT_RUNS = re.compile(r"(\d+)")
+
+
 def filename_sort_key(file_name):
-    """Legacy ordering key: the first run of digits in the basename, or +inf for
-    a name with no digits (which used to be dropped from the series entirely)."""
-    number_match = re.search(r'\d+', os.path.splitext(file_name)[0])
-    return int(number_match.group()) if number_match else float("inf")
+    """Natural ordering key: every run of digits in the basename compared as a number, so
+    "RPV_16_2.jpg" sorts before "RPV_16_10.jpg" and "F1 Plate 30009.tif" before "F1 Plate 30010.tif".
+    Names without digits sort after the numbered ones. (It used to key on the FIRST run of digits
+    only, which is the same for every frame of "RPV_16_<n>.jpg", so the series fell back to
+    the text order 0, 1, 10, 100, 101, ...)"""
+    parts = _DIGIT_RUNS.split(os.path.splitext(file_name)[0])
+    return (len(parts) == 1, tuple(int(p) if i % 2 else p.lower() for i, p in enumerate(parts)))
+
+
+def _interpolate_missing_times(ordered, capture_times):
+    """Fill the missing capture times of a series whose other timestamps increase along `ordered`:
+    linear between the nearest timed neighbours, and the median step beyond the first / last one."""
+    timed = [i for i, f in enumerate(ordered) if capture_times[f] is not None]
+    steps = [(capture_times[ordered[b]] - capture_times[ordered[a]]) / (b - a) for a, b in zip(timed, timed[1:])]
+    step = sorted(steps)[len(steps) // 2]
+    filled = dict(capture_times)
+    for i, f in enumerate(ordered):
+        if filled[f] is not None:
+            continue
+        before = max((k for k in timed if k < i), default=None)
+        after = min((k for k in timed if k > i), default=None)
+        if before is not None and after is not None:
+            t0, t1 = capture_times[ordered[before]], capture_times[ordered[after]]
+            filled[f] = t0 + (t1 - t0) * ((i - before) / (after - before))
+        elif before is not None:
+            filled[f] = capture_times[ordered[before]] + step * (i - before)
+        else:
+            filled[f] = capture_times[ordered[after]] - step * (after - i)
+    return filled
 
 
 def order_series(path, filenames):
@@ -128,24 +156,30 @@ def order_series(path, filenames):
 
     ORDER comes from the timestamps embedded in the files themselves, when every
     frame has one and they aren't all identical. Filesystem times are never used
-    (see get_capture_time). Without embedded timestamps this falls back to the
-    legacy first-integer-in-the-filename key -- also imperfect, since it takes
-    the FIRST run of digits: every frame of example_data/Camera_1 keys on 13
-    (from "RPV_13_0.jpg") and every frame of F1_Plate_2_YS keys on 1 (from
-    "F1 Plate 2000.tif"), so the sort degenerates to the lexicographic tiebreak.
-    That happens to be right for F1_Plate_2_YS (fixed-width numbering) and badly
-    wrong for Camera_1 (which is why its 168 frames used to load as 0, 1, 10,
-    100, 101, ... -- fixed here by its timestamps being read at last).
+    (see get_capture_time). Otherwise the order is the natural order of the file
+    names (filename_sort_key: every number in the name counts).
+
+    A few frames without a timestamp -- typically a corrupt file, which also cannot
+    be read -- no longer throw the others away: when the frames that do have one
+    increase along the file-name order, that order is kept and the missing times
+    are interpolated from the neighbours (logged as a warning). Before, a single
+    unreadable frame sent the whole series to the file-name fallback, which for
+    names such as "RPV_16_<n>.jpg" was the text order 0, 1, 10, 100, ...
     """
     capture_times = {f: get_capture_time(os.path.join(path, f)) for f in filenames}
 
     times = list(capture_times.values())
     usable = all(t is not None for t in times) and len(set(times)) > 1
     if usable:
-        ordered = sorted(filenames, key=lambda f: (capture_times[f], f))
-    else:
-        ordered = sorted(filenames, key=lambda f: (filename_sort_key(f), f))
+        return sorted(filenames, key=lambda f: (capture_times[f], f)), capture_times
 
+    ordered = sorted(filenames, key=lambda f: (filename_sort_key(f), f))
+    timed = [capture_times[f] for f in ordered if capture_times[f] is not None]
+    missing = [f for f in ordered if capture_times[f] is None]
+    if missing and len(timed) >= 2 and all(b > a for a, b in zip(timed, timed[1:])):
+        capture_times = _interpolate_missing_times(ordered, capture_times)
+        log.warning(f"{len(missing)} frame(s) carry no capture time ({', '.join(missing[:5])}"
+                    f"{', ...' if len(missing) > 5 else ''}); their time is interpolated from the neighbours")
     return ordered, capture_times
 
 

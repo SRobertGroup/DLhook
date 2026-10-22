@@ -600,3 +600,90 @@ def test_gui_review_flagged_frames_opens_the_first_queued_frame(monkeypatch):
     gui.frame_results_by_crop[0][1]["state_dict"][1] = "Manual"
     assert sw.SeedlingWindowsMixin.review_flagged_frames(gui, quiet=True) == 0 and infos == []
     assert sw.SeedlingWindowsMixin.review_flagged_frames(gui) == 0 and len(infos) == 1
+
+
+# ---- O: keep the landmarks, apply the overhook -----------------------------------------------------
+
+def test_o_applies_and_removes_the_overhook_and_the_reading_says_so(tmp_path, monkeypatch, tk_root):
+    from ui.analysis_window import SeedlingAnalysisWindow
+
+    monkeypatch.chdir(tmp_path)
+    gui, results = _fake_gui(tk_root, tmp_path)
+    results[0]["landmarks"][1]["overhook"] = True               # the model's own flag: a suggestion only
+    win = SeedlingAnalysisWindow(gui, 0)
+    try:
+        text = lambda: win.angle_label.cget("text")
+        assert "model suggests an overhook, not applied: angle = 180 − θ = 150°" in text() and "(O applies it: 210°)" in text()
+        assert win.overhook_var.get() == 0
+
+        win._on_overhook_key()                                  # applied: Manual, 180 + theta, series redone
+        res = results[0]
+        assert res["state_dict"][1] == "Manual" and res["angle_dict"][1] == pytest.approx(210.0, abs=0.01)
+        assert res["landmarks"][1]["overhook"] is True and res["landmarks"][1]["edit"] == "manual"
+        assert gui.calls == [0] and win.overhook_var.get() == 1
+        assert "overhook applied: angle = 180 + θ = 210°" in text() and "(O removes it: 150°)" in text()
+
+        win._on_overhook_key()                                  # removed again, in place
+        assert res["angle_dict"][1] == pytest.approx(150.0, abs=0.01) and res["state_dict"][1] == "Manual"
+        assert res["landmarks"][1]["overhook"] is False and win.overhook_var.get() == 0 and gui.calls == [0, 0]
+        assert "overhook not applied: angle = 180 − θ = 150°" in text() and "suggests" not in text()
+
+        win.overhook_var.set(1)                                 # the box does the same as the key
+        win._on_overhook_toggled()
+        assert res["angle_dict"][1] == pytest.approx(210.0, abs=0.01) and win.overhook_var.get() == 1
+        win.show_frame(1)                                       # the box follows the frame
+        assert win.overhook_var.get() == 0 and "overhook not applied" in text()
+        win.show_frame(0)
+        assert win.overhook_var.get() == 1
+    finally:
+        win.destroy()
+
+
+def test_o_in_click_mode_only_toggles_the_box_and_a_blanked_frame_refuses(tmp_path, monkeypatch, tk_root):
+    from ui.analysis_window import SeedlingAnalysisWindow
+
+    monkeypatch.chdir(tmp_path)
+    gui, results = _fake_gui(tk_root, tmp_path)
+    win = SeedlingAnalysisWindow(gui, 0)
+    win.canvas.canvas_to_image = lambda x, y: (x, y)
+    try:
+        win._toggle_manual_angle_mode()
+        win._on_overhook_key()
+        assert win.overhook_var.get() == 1 and results[0]["state_dict"][1] == "Closed" and gui.calls == []
+        for p in CLICKS:
+            win._place_landmark_point(SimpleNamespace(x=p[0], y=p[1]))
+        assert "no overhook" in win.angle_label.cget("text") or "overhook applied" in win.angle_label.cget("text")
+        before = win.overhook_var.get()                          # C2 set it from the ray-crossing test
+        win._on_overhook_key()
+        assert win.overhook_var.get() == 1 - before and results[0]["state_dict"][1] == "Closed"
+        win._toggle_manual_angle_mode()                          # leave click mode without applying
+
+        win._blank_angle()
+        win._on_overhook_key()
+        assert np.isnan(results[0]["angle_dict"][1]) and "blanked" in win.status_label.cget("text")
+        assert "overhook" not in win.angle_label.cget("text").replace("blanked by hand", "")
+    finally:
+        win.destroy()
+
+
+def test_overhook_on_a_saved_edit_updates_its_record(tmp_path, monkeypatch, tk_root):
+    from ui.analysis_window import SeedlingAnalysisWindow
+
+    monkeypatch.chdir(tmp_path)
+    gui, results = _fake_gui(tk_root, tmp_path)
+    edits = tmp_path / "edits"
+    gui.landmark_edits_dir = str(edits)
+    win = SeedlingAnalysisWindow(gui, 0)
+    try:
+        win.save_edits_var.set(True)
+        win._on_overhook_key()                                   # model reading + overhook, saved
+        rec_path = next(edits.glob("*.json"))
+        rec = json.loads(rec_path.read_text(encoding="utf-8"))
+        assert rec["overhook"] == 1 and rec["bio_angle"] == pytest.approx(180 + rec["theta"], abs=0.01)
+        assert rec["model_readout"]["edit"] == "model"
+        win._on_overhook_key()                                   # removed: the same record is updated, not replaced
+        rec = json.loads(rec_path.read_text(encoding="utf-8"))
+        assert rec["overhook"] == 0 and rec["bio_angle"] == pytest.approx(180 - rec["theta"], abs=0.01)
+        assert rec["model_readout"]["edit"] == "model" and len(list(edits.glob("*.json"))) == 1
+    finally:
+        win.destroy()

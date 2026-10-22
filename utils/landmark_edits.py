@@ -91,6 +91,22 @@ def record_stem(record):
     return f"{record['series']}_{base}"
 
 
+def set_record_overhook(directory, series, crop_file, overhook):
+    """Change the overhook of an edit record already written for this frame (and its bio_angle).
+    False when no such record exists: a reading that was never saved for retraining has nothing to update."""
+    stem = f"{series}_{os.path.splitext(os.path.basename(crop_file))[0]}"
+    path = os.path.join(directory, f"{stem}.json")
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as fh:
+        rec = json.load(fh)
+    rec["overhook"] = int(bool(overhook))
+    rec["bio_angle"] = round(180.0 + rec["theta"] if overhook else 180.0 - rec["theta"], 3)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh, indent=1)
+    return True
+
+
 def write_edit(directory, record, crop_path, edited_mask=None):
     """Write <directory>/<stem>.json, copy the crop to <directory>/crops/<stem>.png and, for
     `edited_mask` (one array, or {label: array}; 255 = foreground), save it under masks/.

@@ -1,0 +1,331 @@
+"""Landmark supervision from the hand-annotation clicks (ui/angle_annotator.py).
+
+Each annotated crop has five clicks (utils/angle_annotation.py): the junction
+where the cotyledons meet the hypocotyl, two points on the hypocotyl axis and
+two on the cotyledon axis (the CSV also has an Overhook flag, which is ignored: it is a few
+degrees past 180 deg, below the repeatability of the clicks). They become two targets:
+
+* a Gaussian HEATMAP at the junction -- the only anatomically fixed point;
+* two unit-vector FIELDS (hypocotyl, cotyledon) pointing away from the junction,
+  supervised only on the pixels within `ray_width` of the ray from the junction
+  to the farthest click on that axis. The axis points are "anywhere along the
+  axis", so nothing outside the ray is constrained -- a point-on-axis click
+  must not become a target position.
+
+With a collar/root CSV (ui/root_annotator.py) a crop also gets the plant COLLAR
+(root-hypocotyl transition) as a second Gaussian heatmap and the ROOT direction as
+a unit-vector field along the ray collar -> root click, supervised like the other
+axes. Crops without a visible radicle simply have no collar targets.
+
+Reading them back (`readout_from_fields`) takes the junction as the heatmap
+peak and each direction from the field at the junction, where both rays start
+and the field is guaranteed to be supervised (readout_radius <= ray_width). The
+angle is then `theta` = angle between the two directions, in the app's bio
+convention 180 - theta (no overhook reading).
+
+Everything here is pure numpy so it is unit-testable without torch.
+"""
+from __future__ import annotations
+
+import csv
+import math
+import os
+import random
+from dataclasses import dataclass, replace
+
+import numpy as np
+
+from .config import ensure_repo_root_importable
+
+ensure_repo_root_importable()
+
+from utils.angle_annotation import orient_axis  # noqa: E402
+from utils.angle_review import read_rows  # noqa: E402
+from utils.landmark_readout import (  # noqa: E402,F401  (re-exported: pure readout lives in utils/)
+    PEAK_FOUND, READOUT_RADIUS, bio_from_theta, readout_from_fields, rays_cross, theta_between,
+)
+
+HM_SIGMA = 3.0
+RAY_WIDTH = 4.0
+MIN_RAY_LENGTH = 8.0
+PEAK_PRESENT = 0.5        # a rendered/predicted junction counts as "in the patch" above this
+KP_CHANNELS = 5           # 1 junction logit + 2 x (x, y) direction fields
+KP_CHANNELS_ROOT = 8      # + 1 collar logit + (x, y) root direction field
+KP_CHANNELS_COTYL = 10    # + cotyledon base and tip heatmap logits
+
+
+@dataclass(frozen=True)
+class Landmark:
+    filename: str          # crop file name, e.g. "3-crop-F1_Plate_2_YS_IMG_139.png"
+    seedling: tuple        # (series, crop_id) -- crop_id repeats across series
+    junction: tuple        # (x, y) in crop pixels, continuous (pixel i spans [i, i+1))
+    hypo_dir: tuple        # unit vector, junction -> along the hypocotyl, away from it
+    cotyl_dir: tuple       # unit vector, junction -> along the cotyledon, away from it
+    hypo_len: float
+    cotyl_len: float
+    collar: tuple | None = None      # (x, y) crop pixels; None when no radicle is annotated
+    root_dir: tuple | None = None    # unit vector collar -> along the root
+    root_len: float = 0.0
+    cotyl_base: tuple | None = None  # (x, y) the cotyledon click nearer the junction
+    cotyl_tip: tuple | None = None   # (x, y) the farther one: the cotyledon tip, or the midpoint between the tips
+
+    @property
+    def theta(self) -> float:
+        return theta_between(self.hypo_dir, self.cotyl_dir)
+
+    @property
+    def overhook(self) -> bool:
+        """The clicked cotyledon axis (base -> tip) crosses the clicked hypocotyl axis (junction -> away)."""
+        if self.cotyl_base is None or self.cotyl_tip is None:
+            return False
+        along = np.asarray(self.cotyl_tip, float) - np.asarray(self.cotyl_base, float)
+        n = float(np.hypot(*along))
+        return n > 1e-6 and rays_cross(self.cotyl_base, along / n, self.junction, self.hypo_dir)
+
+
+def _ray(junction, p1, p2):
+    """(unit direction away from the junction, length to the farthest click)."""
+    u = orient_axis(p1, p2, junction)
+    length = max(float(np.dot(np.asarray(p, float) - np.asarray(junction, float), u)) for p in (p1, p2))
+    return (float(u[0]), float(u[1])), max(length, MIN_RAY_LENGTH)
+
+
+def _attach_roots(out, root_csv_path):
+    """Add collar / root direction from a root_annotator CSV to the landmarks in `out`
+    (frames with a visible radicle only). Returns how many crops got them."""
+    n = 0
+    with open(root_csv_path, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            lm = out.get(row.get("crop_file"))
+            if lm is None or row.get("status") != "annotated" or row.get("radicle_visible") != "1":
+                continue
+            try:
+                collar = (float(row["collar_x"]), float(row["collar_y"]))
+                root = (float(row["root_x"]), float(row["root_y"]))
+            except (ValueError, KeyError):
+                continue
+            dx, dy = root[0] - collar[0], root[1] - collar[1]
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+            out[lm.filename] = replace(lm, collar=collar, root_dir=(dx / length, dy / length),
+                                       root_len=max(length, MIN_RAY_LENGTH))
+            n += 1
+    return n
+
+
+def apply_marks(out, marks_csv):
+    """Override junction / collar of the landmarks in `out` with the CORRECTED points of a
+    utils/landmark_marks.py CSV (ui/seg_annotator.py markers). A corrected junction moves only the
+    junction (axes and angle unchanged); a corrected collar keeps the crop's root direction, else the
+    one stored with the mark, and is dropped without either. Returns counts."""
+    from utils.landmark_marks import MarksStore
+    counts = {"marks_junction": 0, "marks_collar": 0, "marks_collar_no_root": 0}
+    store = MarksStore(str(marks_csv))
+    for crop in store.rows:
+        lm = out.get(crop)
+        if lm is None:
+            continue
+        c = store.corrected(crop)
+        if c["junction"] is not None:
+            lm = replace(lm, junction=c["junction"])
+            counts["marks_junction"] += 1
+        if c["collar"] is not None:
+            root_dir = lm.root_dir or c["root_dir"]
+            if root_dir is None:
+                counts["marks_collar_no_root"] += 1
+            else:
+                lm = replace(lm, collar=c["collar"], root_dir=tuple(root_dir),
+                             root_len=lm.root_len or MIN_RAY_LENGTH)
+                counts["marks_collar"] += 1
+        out[crop] = lm
+    return counts
+
+
+def load_landmarks(csv_path, exclude_filenames=(), root_csv_path=None, marks_csv=None):
+    """Landmarks from an annotation CSV (measured rows only), keyed by crop file.
+
+    `exclude_filenames` is the leakage guard: pass the validation split's crop
+    names (multi/processed/patch_index/val_patches.csv) so no held-out crop can
+    become a training target. Returns (landmarks, report) where report counts
+    loaded / excluded / invalid rows (an invalid row is one whose clicks cannot
+    be oriented, e.g. both axis points on opposite sides of the junction).
+    `root_csv_path` (a ui/root_annotator.py CSV) adds the collar and root direction to
+    the crops it covers; report["with_root"] counts them. `marks_csv` (a utils/landmark_marks.py
+    CSV) then applies the corrected junction / collar points (apply_marks; counts in the report)."""
+    exclude = set(exclude_filenames)
+    out, report = {}, {"loaded": 0, "excluded": 0, "invalid": 0}
+    for row in read_rows(csv_path):                         # the review sidecar is applied
+        if row.get("status") != "measured":
+            continue
+        name = row["crop_file"]
+        if name in exclude:
+            report["excluded"] += 1
+            continue
+        try:
+            pt = lambda p: (float(row[f"{p}_x"]), float(row[f"{p}_y"]))
+            j = pt("junction")
+            hypo_dir, hypo_len = _ray(j, pt("hypo1"), pt("hypo2"))
+            cotyl_dir, cotyl_len = _ray(j, pt("cotyl1"), pt("cotyl2"))
+        except (ValueError, KeyError):
+            report["invalid"] += 1
+            continue
+        c1, c2 = pt("cotyl1"), pt("cotyl2")
+        near_first = math.hypot(c1[0] - j[0], c1[1] - j[1]) <= math.hypot(c2[0] - j[0], c2[1] - j[1])
+        base, tip = (c1, c2) if near_first else (c2, c1)
+        out[name] = Landmark(name, (row.get("series", ""), int(row["crop_id"])), j, hypo_dir,
+                             cotyl_dir, hypo_len, cotyl_len, cotyl_base=base, cotyl_tip=tip)
+        report["loaded"] += 1
+    if root_csv_path:
+        report["with_root"] = _attach_roots(out, root_csv_path)
+    if marks_csv and os.path.exists(marks_csv):
+        report.update(apply_marks(out, marks_csv))
+    return out, report
+
+
+def load_measurable_negatives(csv_path, exclude_filenames=(), tag=None, seedling_groups=None):
+    """Crops an annotator could not measure, the negatives of the "measurable" head:
+    {key: seedling} for rows with status "skipped", or "unmeasurable" in the review sidecar.
+    "rotation" frames are left out (the hook is there, the 2-D angle is not). Keys and seedlings
+    follow the landmark sets: "<tag>/<crop file>" and ("<tag>/<series>", crop_id) with a tag, and a
+    `seedling_groups` map ({"series:crop_id": "[tag/]series:crop_id"}) re-assigns a plant that also
+    appears in another set, exactly as load_extra_landmark_sources does for the measured frames."""
+    from utils.angle_review import UNMEASURABLE
+
+    exclude = set(exclude_filenames)
+    out = {}
+    for row in read_rows(csv_path):
+        if row.get("status") not in ("skipped", UNMEASURABLE):
+            continue
+        name = row.get("crop_file") or ""
+        if not name or name in exclude:
+            continue
+        try:
+            series, crop_id = row["series"], int(row["crop_id"])
+        except (KeyError, ValueError):
+            continue
+        seedling = (f"{tag}/{series}" if tag else series, crop_id)
+        target = (seedling_groups or {}).get(f"{series}:{crop_id}")
+        if target:
+            t_series, _, t_id = target.rpartition(":")
+            seedling = (t_series, int(t_id))
+        out[f"{tag}/{name}" if tag else name] = seedling
+    return out
+
+
+def split_by_seedling(landmarks, val_fraction=0.15, seed=0):
+    """(train, val) dicts, split so that all frames of one seedling land on the
+    same side -- frames of one seedling are near-duplicates."""
+    keys = sorted({lm.seedling for lm in landmarks.values()})
+    random.Random(seed).shuffle(keys)
+    n_val = int(round(len(keys) * val_fraction)) if len(keys) >= 2 else 0
+    if val_fraction > 0 and len(keys) >= 2:
+        n_val = max(1, n_val)
+    val_keys = set(keys[:n_val])
+    train = {n: lm for n, lm in landmarks.items() if lm.seedling not in val_keys}
+    val = {n: lm for n, lm in landmarks.items() if lm.seedling in val_keys}
+    return train, val
+
+
+def render_targets(h, w, lm: Landmark, sigma=HM_SIGMA, ray_width=RAY_WIDTH):
+    """Targets on an h x w crop grid (before any padding or patch cut).
+
+    Returns float32 arrays: hm (h, w), paf (4, h, w) = [hypo_x, hypo_y, cotyl_x,
+    cotyl_y], paf_valid (2, h, w) = 1 where that axis' field is supervised."""
+    yy, xx = np.mgrid[0:h, 0:w]
+    px, py = xx + 0.5, yy + 0.5                       # pixel centres
+    jx, jy = lm.junction
+    hm = np.exp(-((px - jx) ** 2 + (py - jy) ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
+
+    paf = np.zeros((4, h, w), np.float32)
+    valid = np.zeros((2, h, w), np.float32)
+    for k, (u, length) in enumerate(((lm.hypo_dir, lm.hypo_len), (lm.cotyl_dir, lm.cotyl_len))):
+        t = np.clip((px - jx) * u[0] + (py - jy) * u[1], 0.0, length)
+        dist = np.hypot(px - (jx + t * u[0]), py - (jy + t * u[1]))
+        on_ray = dist <= ray_width
+        valid[k][on_ray] = 1.0
+        paf[2 * k][on_ray] = u[0]
+        paf[2 * k + 1][on_ray] = u[1]
+
+    collar_hm = np.zeros((h, w), np.float32)
+    root_vec = np.zeros((2, h, w), np.float32)
+    root_valid = np.zeros((1, h, w), np.float32)
+    if lm.collar is not None and lm.root_dir is not None:
+        cx, cy = lm.collar
+        collar_hm = np.exp(-((px - cx) ** 2 + (py - cy) ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
+        u = lm.root_dir
+        t = np.clip((px - cx) * u[0] + (py - cy) * u[1], 0.0, lm.root_len)
+        on_ray = np.hypot(px - (cx + t * u[0]), py - (cy + t * u[1])) <= ray_width
+        root_valid[0][on_ray] = 1.0
+        root_vec[0][on_ray] = u[0]
+        root_vec[1][on_ray] = u[1]
+    base_hm = np.zeros((h, w), np.float32)
+    tip_hm = np.zeros((h, w), np.float32)
+    if lm.cotyl_base is not None and lm.cotyl_tip is not None:
+        bx, by = lm.cotyl_base
+        tx, ty = lm.cotyl_tip
+        base_hm = np.exp(-((px - bx) ** 2 + (py - by) ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
+        tip_hm = np.exp(-((px - tx) ** 2 + (py - ty) ** 2) / (2.0 * sigma ** 2)).astype(np.float32)
+    return {"hm": hm, "paf": paf, "paf_valid": valid,
+            "collar_hm": collar_hm, "root_vec": root_vec, "root_valid": root_valid,
+            "base_hm": base_hm, "tip_hm": tip_hm}
+
+
+def pad_targets_to_min(array, min_size):
+    """Zero-pad a (H, W) or (C, H, W) target up to min_size x min_size with the
+    same centred offsets as multi/src/patch_index.pad_to_min. Constant zeros,
+    not reflection: reflecting a heatmap would duplicate the junction peak."""
+    h, w = array.shape[-2:]
+    h_pad, w_pad = max(0, min_size - h), max(0, min_size - w)
+    if not (h_pad or w_pad):
+        return array
+    pad = [(h_pad // 2, h_pad - h_pad // 2), (w_pad // 2, w_pad - w_pad // 2)]
+    if array.ndim == 3:
+        pad = [(0, 0)] + pad
+    return np.pad(array, pad, mode="constant")
+
+
+ANGLE_BIN_EDGES = (45.0, 135.0)     # theta (angle between the axes): closed < 45 <= middle < 135 <= open
+
+
+def angle_bin(theta, edges=ANGLE_BIN_EDGES):
+    return sum(theta >= e for e in edges)
+
+
+def angle_balanced_weights(landmarks, edges=ANGLE_BIN_EDGES):
+    """{crop file: weight} that give each angle bin (closed / middle / open hook) the same total
+    weight, the mean weight being 1. Annotated frames are mostly closed hooks; drawing all of them
+    equally often makes the rare open ones count for little, and oversampling the open ones alone
+    costs the closed ones (run 9). Bins with no frame are ignored."""
+    bins = {name: angle_bin(lm.theta, edges) for name, lm in landmarks.items()}
+    counts = {}
+    for b in bins.values():
+        counts[b] = counts.get(b, 0) + 1
+    n, k = len(bins), len(counts)
+    return {name: n / (k * counts[b]) for name, b in bins.items()} if n else {}
+
+
+def namespace_landmarks(landmarks, tag):
+    """Re-key landmarks from another crop folder as "<tag>/<crop file>", with the seedling
+    key prefixed the same way. Crop names restart in every crop folder (two folders can both
+    hold "3-crop-HR_Plate_6_IMG_12.png" for different seedlings), so a merged pool needs
+    distinct keys -- and distinct seedlings, or split_by_seedling would fuse them."""
+    out = {}
+    for name, lm in landmarks.items():
+        key = f"{tag}/{name}"
+        out[key] = replace(lm, filename=key, seedling=(f"{tag}/{lm.seedling[0]}", lm.seedling[1]))
+    return out
+
+
+def landmark_patch_rows(sizes, patch_size, stride, raw_paths):
+    """Patch-index rows (PatchDataset extra_rows) tiling whole crops that have no
+    pseudo-label mask. `sizes` is {key: (h, w)} and `raw_paths` {key: image path}; tiles
+    follow build_patch_index (pad_to_min, then _tile_origins), labels are all ignore."""
+    from .patch_index import _tile_origins
+    rows = []
+    for key in sorted(sizes):
+        h, w = sizes[key]
+        for x, y in _tile_origins(max(h, patch_size), max(w, patch_size), patch_size, stride):
+            rows.append({"filename": key, "x": str(x), "y": str(y), "patch_size": str(patch_size),
+                         "foreground_fraction": "nan", "raw_path": str(raw_paths[key]), "no_mask": "1"})
+    return rows

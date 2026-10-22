@@ -4,14 +4,19 @@ title: "DLhook: High-throughput apical hook phenotyping of dark-grown Arabidopsi
 authors:
   - family-names: Radianu
     given-names: David
-  - family-names: Heymans
-    given-names: Adrien
+  - family-names: Raggi
+    given-names: Sara
+  - family-names: Yadav
+    given-names: Sandeep
+  - family-names: Ratnakaram
+    given-names: Hemamshu
   - family-names: Doyle
     given-names: Siamsa
   - family-names: Robert
     given-names: Stéphanie
-  - family-names: Raggi
-    given-names: Sara
+  - family-names: Heymans
+    given-names: Adrien
+  # Stéphanie Robert and Adrien Heymans are co-corresponding authors (asterisks in the README citation).
 date-released: 2025-06-04
 version: "0.3.0"
 license: GPL-3.0

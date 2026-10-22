@@ -1,6 +1,7 @@
 import tkinter as tk
 
 import cv2
+import numpy as np
 from PIL import Image, ImageTk
 
 MAX_ZOOM_MULTIPLIER = 8
@@ -10,6 +11,13 @@ ZOOM_STEP = 1.2
 # the same crisp dot/line at every zoom level instead of growing with the image.
 ANGLE_MARKER_RADIUS_PX = 3
 ANGLE_MARKER_WIDTH_PX = 2
+POLYLINE_WIDTH_PX = 2
+CONTOUR_WIDTH_PX = 2
+
+
+def _hex_to_rgb(color):
+    c = color.lstrip("#")
+    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
 
 
 class ZoomableImageCanvas(tk.Canvas):
@@ -17,15 +25,15 @@ class ZoomableImageCanvas(tk.Canvas):
     A tk.Canvas that displays a numpy BGR image with mouse-wheel zoom,
     centered on the cursor, and canvas<->image coordinate mapping that
     accounts for the current zoom level -- generalizes the app's existing
-    fixed-scale canvas_to_image_coords helper so Phase 7's brush strokes land
-    on the right mask pixel regardless of zoom.
+    fixed-scale canvas_to_image_coords helper so clicks land on the right
+    image pixel regardless of zoom.
 
     No click-drag pan gesture by design: minimum zoom always shows the whole
     image (like "fit to window"), so there's no off-image blank space to pan
-    into, and left-click-drag is reserved entirely for brush painting.
+    into, and left click is reserved for placing landmarks.
     """
 
-    def __init__(self, parent, width=600, height=600, **kwargs):
+    def __init__(self, parent, width=600, height=600, pan=False, **kwargs):
         super().__init__(parent, width=width, height=height, bg="#FFFFFF", **kwargs)
         self.display_width = width
         self.display_height = height
@@ -37,31 +45,36 @@ class ZoomableImageCanvas(tk.Canvas):
         self._center_x = 0
         self._center_y = 0
 
-        # Brush preview circle, in image-space (so it stays correctly placed
-        # across zoom changes) -- (img_x, img_y, img_radius, outline_color) or
-        # None when hidden. Stored rather than only drawn on the spot because
-        # _redraw() does delete("all") on every zoom/frame change and must
-        # re-draw it after the image to keep it on top.
-        self._brush_preview = None
-
         # Manual angle markers, same idea: image-space points + a color, drawn
         # as canvas items rather than burned into the image, so they don't get
         # magnified into blobs by the zoom upscale.
-        self._angle_markers = ([], None)
+
+        # Generic image-space overlay (points / lines / arrows), see set_overlay.
+        self._overlay = []
 
         self.bind("<MouseWheel>", self._on_mousewheel)  # Windows/macOS
+        # Opt-in right-drag pan (the seg annotator paints with the left button at high zoom).
+        self._pan_from = None
+        if pan:
+            self.bind("<ButtonPress-3>", self._pan_start)
+            self.bind("<B3-Motion>", self._pan_move)
+            self.bind("<ButtonRelease-3>", lambda e: setattr(self, "_pan_from", None))
         self.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, ZOOM_STEP))  # Linux scroll up
         self.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / ZOOM_STEP))  # Linux scroll down
 
-    def set_image(self, image):
+    def set_image(self, image, reset_view=False, overlay=None):
         """image: HxWx3 BGR numpy array, in the same pixel space as any
         overlay/mask the caller wants to paint or map coordinates against.
 
         Zoom/center are only initialized on the very first image, then left
         alone on every later call -- so navigating between a seedling's
         frames (all the same size) keeps whatever region the user zoomed
-        into, instead of resetting to fit-to-window on every frame change."""
-        is_first_image = self._image is None
+        into, instead of resetting to fit-to-window on every frame change.
+        reset_view=True forces a fresh fit-to-window, for a caller switching
+        to an image of a different size."""
+        if overlay is not None:
+            self._overlay = list(overlay)       # drawn by the _redraw below, not a second one
+        is_first_image = self._image is None or reset_view
         h, w = image.shape[:2]
         self._image = image
 
@@ -89,63 +102,64 @@ class ZoomableImageCanvas(tk.Canvas):
         self._center_y = h / 2
         self._redraw()
 
-    def set_brush_preview(self, img_x, img_y, img_radius, outline="#ffff00"):
-        """Shows/moves the brush-size preview circle, in image-space
-        coordinates so it tracks the cursor correctly at any zoom level."""
-        self._brush_preview = (img_x, img_y, img_radius, outline)
-        self._draw_brush_preview()
+    def set_overlay(self, shapes):
+        """Image-space annotation overlay, drawn as fixed-screen-size canvas
+        items (crisp at any zoom, like the angle markers). `shapes` is a list
+        of dicts:
+            {"kind": "point", "xy": (x, y), "color": c, "label": "J"}
+            {"kind": "line", "from": (x, y), "to": (x, y), "color": c,
+             "arrow": bool, "dash": bool}
+            {"kind": "polyline", "pts": [(x, y), ...], "color": c}   (fixed screen width)
+            {"kind": "contour", "pts": [(x, y), ...], "color": c, "alpha": 0.5}
+            {"kind": "mask", "mask": HxW bool array, "color": c, "alpha": 0.4}   (filled)
+        A "mask" is alpha-blended over its pixels (nearest-neighbour at the zoom, so painted
+        pixels stay crisp). A "contour" is alpha-blended into the displayed (zoomed) image along its own pixels only
+        (Tk canvas lines have no alpha), so it stays 1-2 screen px wide at any zoom and the raw
+        image is untouched elsewhere."""
+        blended = ("contour", "mask")
+        had_contour = any(s["kind"] in blended for s in self._overlay)
+        self._overlay = list(shapes)
+        if had_contour or any(s["kind"] in blended for s in self._overlay):
+            self._redraw()          # contours are blended into the image itself
+        else:
+            self._draw_overlay()
 
-    def clear_brush_preview(self):
-        self._brush_preview = None
-        self.delete("brush_preview")
-
-    def _draw_brush_preview(self):
-        self.delete("brush_preview")
-        if self._brush_preview is None or self._image is None:
+    def _draw_overlay(self):
+        self.delete("overlay")
+        if not self._overlay or self._image is None:
             return
-        img_x, img_y, img_radius, outline = self._brush_preview
         x1, y1, _, _ = self._visible_bounds()
-        cx = (img_x - x1) * self.zoom
-        cy = (img_y - y1) * self.zoom
-        r = max(1.0, img_radius * self.zoom)
-        self.create_oval(cx - r, cy - r, cx + r, cy + r,
-                          outline=outline, width=2, tags="brush_preview")
 
-    def set_angle_markers(self, points, color):
-        """Shows the manual-angle placement markers: dots at each image-space
-        (x, y) in `points`, joined in order. Drawing these as canvas items
-        instead of cv2.circle/cv2.line on the image itself is what keeps them
-        crisp -- a 4 px dot burned into a crop shown at 10x zoom became a 40 px
-        hard-edged blob, and a click could only be placed on a visible 10 px
-        grid."""
-        self._angle_markers = (list(points), color)
-        self._draw_angle_markers()
+        def to_canvas(p):
+            return (p[0] - x1) * self.zoom, (p[1] - y1) * self.zoom
 
-    def clear_angle_markers(self):
-        self._angle_markers = ([], None)
-        self.delete("angle_markers")
-
-    def _draw_angle_markers(self):
-        self.delete("angle_markers")
-        points, color = self._angle_markers
-        if not points or self._image is None:
-            return
-
-        x1, y1, _, _ = self._visible_bounds()
-        canvas_points = [((px - x1) * self.zoom, (py - y1) * self.zoom) for px, py in points]
-
-        for (cx0, cy0), (cx1, cy1) in zip(canvas_points, canvas_points[1:]):
-            self.create_line(cx0, cy0, cx1, cy1, fill=color,
-                              width=ANGLE_MARKER_WIDTH_PX, tags="angle_markers")
-        r = ANGLE_MARKER_RADIUS_PX
-        for cx, cy in canvas_points:
-            self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color,
-                              outline=color, tags="angle_markers")
+        for shape in self._overlay:
+            color = shape.get("color", "#ff3b30")
+            if shape["kind"] == "line":
+                (ax, ay), (bx, by) = to_canvas(shape["from"]), to_canvas(shape["to"])
+                self.create_line(ax, ay, bx, by, fill=color, width=ANGLE_MARKER_WIDTH_PX,
+                                 arrow=tk.LAST if shape.get("arrow") else None,
+                                 arrowshape=(10, 12, 5), dash=(4, 3) if shape.get("dash") else None,
+                                 tags="overlay")
+            elif shape["kind"] == "polyline":
+                pts = [c for p in shape["pts"] for c in to_canvas(p)]
+                if len(pts) >= 4:
+                    self.create_line(*pts, fill=color, width=POLYLINE_WIDTH_PX, tags="overlay")
+            elif shape["kind"] == "point":
+                cx, cy = to_canvas(shape["xy"])
+                r = ANGLE_MARKER_RADIUS_PX + 1
+                if shape.get("hollow"):            # a reference position, not a reading
+                    r += 2
+                    self.create_oval(cx - r, cy - r, cx + r, cy + r, fill="", outline=color, width=2, tags="overlay")
+                else:
+                    self.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline="white", tags="overlay")
+                if shape.get("label"):
+                    self.create_text(cx + r + 3, cy - r - 3, text=shape["label"], anchor=tk.SW,
+                                     fill=color, font=("Helvetica", 10, "bold"), tags="overlay")
 
     def canvas_to_image(self, canvas_x, canvas_y):
         """Maps a canvas pixel coordinate to the image pixel coordinate
-        currently shown there -- Phase 7's brush uses this to know which
-        mask pixel the cursor is over. Uses the uniform zoom factor on both
+        currently shown there. Uses the uniform zoom factor on both
         axes (matching _redraw's letterboxed draw), not a per-axis stretch,
         so this stays correct for non-square images/crops."""
         x1, y1, _, _ = self._visible_bounds()
@@ -193,6 +207,54 @@ class ZoomableImageCanvas(tk.Canvas):
         return (self._center_x - half_view_w, self._center_y - half_view_h,
                 self._center_x + half_view_w, self._center_y + half_view_h)
 
+    def _pan_start(self, event):
+        self._pan_from = (event.x, event.y)
+
+    def _pan_move(self, event):
+        if self._pan_from is None or self._image is None:
+            return
+        dx, dy = event.x - self._pan_from[0], event.y - self._pan_from[1]
+        self._pan_from = (event.x, event.y)
+        self._center_x -= dx / self.zoom
+        self._center_y -= dy / self.zoom
+        self._clamp_center()
+        self._redraw()
+
+    def _blend_masks(self, resized, ix1, iy1, ix2, iy2):
+        """Alpha-blend every "mask" overlay shape (filled) into the zoomed image."""
+        masks = [s for s in self._overlay if s["kind"] == "mask" and s.get("mask") is not None]
+        if not masks:
+            return resized
+        out = resized.astype(np.float32)
+        oh, ow = resized.shape[:2]
+        for shape in masks:
+            m = np.asarray(shape["mask"])
+            part = m[iy1:iy2, ix1:ix2]                 # exactly the region _redraw shows
+            if part.size == 0 or not part.any():
+                continue
+            layer = cv2.resize(part.astype(np.uint8), (ow, oh), interpolation=cv2.INTER_NEAREST) > 0
+            a = float(shape.get("alpha", 0.4))
+            rgb = np.array(_hex_to_rgb(shape.get("color", "#00ff00")), np.float32)
+            out[layer] = out[layer] * (1 - a) + rgb * a
+        return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
+    def _blend_contours(self, resized, ix1, iy1):
+        """Alpha-blend every "contour" overlay shape into the zoomed image, on the line's own pixels
+        only (anti-aliased, CONTOUR_WIDTH_PX wide at screen scale)."""
+        contours = [s for s in self._overlay if s["kind"] == "contour" and len(s["pts"]) >= 2]
+        if not contours:
+            return resized
+        out = resized.astype(np.float32)
+        for shape in contours:
+            layer = np.zeros(resized.shape[:2], np.uint8)
+            pts = (np.asarray(shape["pts"], np.float64) - (ix1, iy1)) * self.zoom
+            cv2.polylines(layer, [np.round(pts * 16).astype(np.int32).reshape(-1, 1, 2)], True, 255,
+                          CONTOUR_WIDTH_PX, cv2.LINE_AA, shift=4)
+            a = (layer.astype(np.float32) / 255.0 * float(shape.get("alpha", 0.5)))[..., None]
+            rgb = np.array(_hex_to_rgb(shape.get("color", "#00ff00")), np.float32)
+            out = out * (1 - a) + rgb * a
+        return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
     def _redraw(self):
         if self._image is None:
             return
@@ -221,10 +283,14 @@ class ZoomableImageCanvas(tk.Canvas):
         offset_x = (ix1 - x1) * self.zoom
         offset_y = (iy1 - y1) * self.zoom
 
-        # No BGR->RGB conversion, matching the rest of the app's existing
-        # (uncorrected) display convention.
+        # The stored image is BGR (cv2.imread, as every caller passes it); PIL/Tk expect RGB.
+        # Converted here, on the displayed pixels only, so red shows as red; the contour colours
+        # are blended after the conversion, in RGB.
+        if resized.ndim == 3 and resized.shape[2] == 3:
+            resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        resized = self._blend_masks(resized, ix1, iy1, ix2, iy2)
+        resized = self._blend_contours(resized, ix1, iy1)
         self._photo = ImageTk.PhotoImage(image=Image.fromarray(resized))
         self.delete("all")
         self.create_image(offset_x, offset_y, image=self._photo, anchor=tk.NW)
-        self._draw_brush_preview()
-        self._draw_angle_markers()
+        self._draw_overlay()

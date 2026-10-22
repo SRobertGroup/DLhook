@@ -14,7 +14,15 @@ STATE_COLORS = {
     "Manual": "tab:purple",
 }
 UNKNOWN_STATE_COLOR = "0.5"
+# Transparency of the per-seedling curves and their points (overlapping seedlings stay readable).
+CURVE_ALPHA = 0.35
+POINT_ALPHA = 0.6
 UNKNOWN_STATE_LABEL = "Unclassified"
+# Points whose landmarks broke a time-series rule (utils/landmark_temporal.py) get a ring.
+FLAG_EDGE_COLOR = "black"
+FLAG_RING_WIDTH = 1.2
+FLAG_LEGEND_LABEL = "Temporal flag"
+FIT_LINE_WIDTH = 1.8
 
 # Line color per seedling, so a seedling stays identifiable even where its
 # points all share one state color. Deliberately disjoint from STATE_COLORS'
@@ -31,11 +39,12 @@ class KinematicsWindow(tk.Toplevel):
     color-coded by the reconstructed bio_state (Closed/Opening/Manual, see
     utils/angle_timeseries.py).
 
-    Manual-refresh only (confirmed with user) -- reads directly from
-    Gui.frame_results_by_crop/time_deltas/germination_detector on each
-    "Refresh" click, so it works with whatever data currently exists
-    (Start Analysis, Preview seedling, or Export results all populate the
-    same shared store), with no live-updating plumbing required.
+    Reads directly from Gui.frame_results_by_crop/time_deltas/germination_detector
+    on each refresh, so it works with whatever data currently exists (Start
+    Analysis, Preview seedling, or Export results all populate the same shared
+    store). It redraws by itself when a seedling's analysis window changes a
+    result (Gui._notify_results_changed -> schedule_refresh); "Refresh" covers
+    everything else (a new analysis or export run).
 
     Each seedling's x-axis is zeroed at its own germination frame -- either
     detected by GerminationDetector or set by hand in SeedlingAnalysisWindow,
@@ -44,7 +53,10 @@ class KinematicsWindow(tk.Toplevel):
     "(ungerminated)" so it's visually distinct rather than silently
     misleading (confirmed with user).
 
-    Points are colored by state and lines by seedling; see the two legends.
+    Points are colored by state (see the legend), lines by seedling; a black ring marks a frame whose
+    landmarks broke a time-series rule (utils/landmark_temporal.py). With "Fitted curves" ticked, each
+    seedling's fitted kinetics curve (utils/hook_kinetics.py, Gui.kinetics_for_crop) is drawn as a thicker
+    line in the seedling's colour over the span it was fitted on.
     """
 
     def __init__(self, gui):
@@ -57,12 +69,50 @@ class KinematicsWindow(tk.Toplevel):
         self.canvas = FigureCanvasTkAgg(self.figure, master=self)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        tk.Button(self, text="Refresh", command=self.refresh).pack(pady=6)
+        # Clicking a point opens that seedling's analysis window at that frame.
+        self._pick_targets = {}      # scatter artist -> (crop_id, frame indices in plotted order)
+        self._refresh_job = None     # pending schedule_refresh redraw
+        self.canvas.mpl_connect("pick_event", self._on_pick)
 
+        bottom = tk.Frame(self)
+        bottom.pack(pady=6)
+        tk.Button(bottom, text="Refresh", command=self.refresh).pack(side=tk.LEFT)
+        self.show_fit = tk.BooleanVar(value=True)
+        tk.Checkbutton(bottom, text="Fitted curves", variable=self.show_fit,
+                       command=self.refresh).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(bottom, text="Click a point to open that seedling at that frame", fg="#555555").pack(
+            side=tk.LEFT, padx=(12, 0))
+
+        self.refresh()
+
+    def _on_pick(self, event):
+        target = self._pick_targets.get(event.artist)
+        if target is None or not len(event.ind):
+            return
+        crop_id, frame_indices = target
+        # Several overlapping points can be hit at once: take the one nearest the click.
+        if event.mouseevent is not None and event.mouseevent.xdata is not None and len(event.ind) > 1:
+            offsets = event.artist.get_offsets()
+            px, py = self.ax.transData.transform((event.mouseevent.xdata, event.mouseevent.ydata))
+            pts = self.ax.transData.transform(offsets[event.ind])
+            best = event.ind[int(np.argmin(np.hypot(pts[:, 0] - px, pts[:, 1] - py)))]
+        else:
+            best = event.ind[0]
+        self.gui.open_seedling_frame(crop_id, frame_indices[best])
+
+    def schedule_refresh(self, delay_ms=150):
+        """Redraw shortly, once: a burst of edits (e.g. "Apply to all seedlings") costs one redraw."""
+        if self._refresh_job is not None:
+            self.after_cancel(self._refresh_job)
+        self._refresh_job = self.after(delay_ms, self._run_scheduled_refresh)
+
+    def _run_scheduled_refresh(self):
+        self._refresh_job = None
         self.refresh()
 
     def refresh(self):
         self.ax.clear()
+        self._pick_targets = {}
 
         n_frames = len(self.gui.file_list) if getattr(self.gui, "file_list", None) else 0
         use_time_deltas = n_frames > 0 and len(self.gui.time_deltas) == n_frames
@@ -86,6 +136,7 @@ class KinematicsWindow(tk.Toplevel):
         # Which encodings actually occur, so each legend lists only what's on
         # screen rather than every state the reconstruction can produce.
         states_seen = []
+        any_flagged = False
         seedling_handles = []
 
         for crop_id, frame_results in sorted(self.gui.frame_results_by_crop.items()):
@@ -93,7 +144,7 @@ class KinematicsWindow(tk.Toplevel):
             time_zero = detector.get_time_zero(crop_id) if detector is not None else None
             unaligned = time_zero is None or time_zero >= len(x_axis_all)
 
-            xs, ys, colors = [], [], []
+            xs, ys, colors, frames, flagged = [], [], [], [], []
             for frame_idx, result in enumerate(frame_results):
                 if result is None or frame_idx >= len(x_axis_all):
                     continue
@@ -107,8 +158,11 @@ class KinematicsWindow(tk.Toplevel):
                     x = x - x_axis_all[time_zero]
                 xs.append(x)
                 ys.append(angle)
+                frames.append(frame_idx)
                 state = result.get("state_dict", {}).get(seed_id)
                 colors.append(STATE_COLORS.get(state, UNKNOWN_STATE_COLOR))
+                readout = (result.get("landmarks") or {}).get(seed_id) or {}
+                flagged.append(bool(readout.get("temporal_flag")) and state != "Manual")
                 state_label = state if state in STATE_COLORS else UNKNOWN_STATE_LABEL
                 if state_label not in states_seen:
                     states_seen.append(state_label)
@@ -120,15 +174,23 @@ class KinematicsWindow(tk.Toplevel):
             xs_sorted = np.array(xs)[order]
             ys_sorted = np.array(ys)[order]
             colors_sorted = [colors[i] for i in order]
+            # per-point ring width (not edge colour: the scatter's alpha would make "none" edges show)
+            ring = [FLAG_RING_WIDTH if flagged[i] else 0.0 for i in order]
+            any_flagged = any_flagged or any(flagged)
 
             style = "--" if unaligned else "-"
             line_color = SEEDLING_LINE_COLORS[crop_id % len(SEEDLING_LINE_COLORS)]
-            label = f"Seedling {seed_id}" + (" (ungerminated)" if unaligned else "")
-            self.ax.plot(xs_sorted/60, ys_sorted, style, color=line_color, linewidth=1, zorder=1)
-            self.ax.scatter(xs_sorted/60, ys_sorted, c=colors_sorted, zorder=2, s=18)
-            seedling_handles.append(Line2D([], [], linestyle=style, color=line_color,
-                                            linewidth=1, label=label))
+            # minutes -> hours on a time axis; a frame-index axis is plotted as is
+            xs_plot = xs_sorted / 60 if use_time_deltas else xs_sorted
+            # Semi-transparent, so overlapping seedlings stay readable and outliers stand out.
+            self.ax.plot(xs_plot, ys_sorted, style, color=line_color, linewidth=1, alpha=CURVE_ALPHA, zorder=1)
+            points = self.ax.scatter(xs_plot, ys_sorted, c=colors_sorted, zorder=2, s=18, alpha=POINT_ALPHA,
+                                     edgecolors=FLAG_EDGE_COLOR, linewidths=ring, picker=5)
+            self._pick_targets[points] = (crop_id, [frames[i] for i in order])
+            self._draw_fit(crop_id, line_color, use_time_deltas, unaligned, x_axis_all)
 
+        if any_plotted and self.show_fit.get() and getattr(self.gui, "kinetics_for_crop", None):
+            seedling_handles.append(Line2D([], [], color="0.3", linewidth=FIT_LINE_WIDTH, label="Fitted curve"))
         if not any_plotted:
             self.ax.text(0.5, 0.5, "No results yet -- run Start Analysis or preview a seedling",
                          ha="center", va="center", transform=self.ax.transAxes)
@@ -147,11 +209,32 @@ class KinematicsWindow(tk.Toplevel):
                        color=STATE_COLORS.get(s, UNKNOWN_STATE_COLOR), label=s)
                 for s in states_seen
             ]
+            if any_flagged:
+                state_handles.append(Line2D([], [], marker="o", linestyle="none", markerfacecolor="white",
+                                            markeredgecolor=FLAG_EDGE_COLOR, label=FLAG_LEGEND_LABEL))
             if state_handles:
-                self.ax.add_artist(self.ax.legend(handles=state_handles, title="State",
-                                                   fontsize=8, title_fontsize=8, loc="upper right"))
-            if seedling_handles:
-                self.ax.legend(handles=seedling_handles, title="Seedling",
-                                fontsize=8, title_fontsize=8, loc="lower left")
+                self.ax.legend(handles=state_handles + seedling_handles, title="State",
+                                fontsize=8, title_fontsize=8, loc="upper right")
 
         self.canvas.draw_idle()
+
+    def _draw_fit(self, crop_id, color, use_time_deltas, unaligned, x_axis_all):
+        """The seedling's fitted kinetics curve, on the same x as its points."""
+        kinetics = getattr(self.gui, "kinetics_for_crop", None)
+        if kinetics is None or not self.show_fit.get():
+            return
+        fit, _, unit, time_zero = kinetics(crop_id)
+        if fit is None:
+            return
+        from utils.hook_kinetics import curve
+        t = np.linspace(fit["t_first"], fit["t_last"], 300)
+        # the fit's t is counted from the germination frame (or frame 0); the plot's x from germination for
+        # an aligned seedling, from the series start otherwise
+        offset = 0.0
+        if unaligned and len(x_axis_all) and np.isfinite(x_axis_all[0]):
+            offset = (x_axis_all[0] / 60.0) if use_time_deltas else 0.0
+        x = t + offset if unit == ("h" if use_time_deltas else "frame") else None
+        if x is None:
+            return
+        self.ax.plot(x, curve(fit["model"], fit["params"], t), "-", color=color, linewidth=FIT_LINE_WIDTH,
+                     alpha=0.9, zorder=3)

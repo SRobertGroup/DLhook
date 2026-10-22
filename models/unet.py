@@ -22,6 +22,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
+import torch
 import torch.nn as nn
 from PIL import Image
 
@@ -102,8 +103,132 @@ class UpBlock(nn.Module):
         return out
 
 
+HEAD_GROUPNORM = 'groupnorm'
+HEAD_PLAIN = 'plain'
+VALID_HEADS = (HEAD_GROUPNORM, HEAD_PLAIN)
+
+
+def build_conv_out(n_classes, head=HEAD_GROUPNORM):
+    """Build the classification head.
+
+    'groupnorm' (the default, and the ONLY behaviour before this parameter
+    existed) is Conv2d -> ReLU -> GroupNorm(n_classes, n_classes). Every
+    shipped RootPainter checkpoint under weights/ was trained with it, and
+    models/UNetInference.py (the live GUI path) constructs UNetGNRes() with
+    no arguments, so this default must never change: it produces
+    conv_out.0.{weight,bias} plus conv_out.2.{weight,bias}.
+
+    'plain' is a bare 1x1 Conv2d -- no ReLU, no GroupNorm -- and produces
+    only conv_out.0.{weight,bias}. One group per channel makes the GroupNorm
+    an *instance* norm over each class channel independently, per image, so
+    every class is rescaled to zero mean / unit variance in every image and
+    the network structurally cannot output "this class is absent here"; the
+    preceding ReLU additionally clamps every negative logit to 0, erasing
+    the "confidently not this class" signal. For classes covering ~0.1-0.2%
+    of pixels that drives over-prediction (a precision-side failure). The
+    plain head is the opt-in alternative under test -- see multi/Readme.md.
+
+    Both variants are wrapped in nn.Sequential so the conv is `conv_out.0`
+    either way, i.e. the plain head's keys are a strict subset of the
+    groupnorm head's.
+    """
+    if head == HEAD_GROUPNORM:
+        return nn.Sequential(
+            nn.Conv2d(64, n_classes, kernel_size=1, padding=0),
+            nn.ReLU(),
+            nn.GroupNorm(n_classes, n_classes)
+        )
+    if head == HEAD_PLAIN:
+        return nn.Sequential(
+            nn.Conv2d(64, n_classes, kernel_size=1, padding=0)
+        )
+    raise ValueError(f"head must be one of {VALID_HEADS}, got {head!r}")
+
+
+def head_from_state_dict(state_dict: dict) -> str:
+    """Infer which `conv_out` head a bare state_dict was saved from.
+
+    Checkpoints in the multi/ pipeline are bare state_dicts (`best.pt`/`last.pt`,
+    and every shipped RootPainter `.pkl`) with no metadata recording the
+    architecture, so the keys themselves are the only evidence available --
+    and they are unambiguous: the groupnorm head's GroupNorm carries affine
+    parameters at `conv_out.2.{weight,bias}`, which the plain head simply
+    does not have. Inferring from the keys means every already-trained
+    checkpoint keeps loading with no format change and no caller has to
+    remember which head a given file was trained with.
+
+    Tolerates the 'module.' prefix DataParallel-saved checkpoints carry (see
+    multi/src/model.py's `_strip_module_prefix`), so it can be called before
+    stripping.
+    """
+    for key in state_dict:
+        name = key[len("module."):] if key.startswith("module.") else key
+        if name.startswith("conv_out.2."):
+            return HEAD_GROUPNORM
+    return HEAD_PLAIN
+
+
+KP_CHANNELS = 5  # landmark head: 1 junction-heatmap logit + 2 x (x, y) direction fields
+KP_CHANNELS_ROOT = 8  # + 1 collar-heatmap logit + the root (x, y) direction field
+KP_CHANNELS_COTYL = 10  # + cotyledon base and cotyledon tip heatmap logits (needs the root head)
+
+
+def strip_deprecated_landmark_keys(state_dict: dict) -> dict:
+    """Drop the `cls_overhook.*` weights of checkpoints trained before the overhook flag was
+    removed from the landmark head (the flag is a few degrees past 180 deg, below the click
+    noise -- see docs/multiclass_progress.md). Everything else loads unchanged."""
+    return {k: v for k, v in state_dict.items()
+            if not k.replace("module.", "", 1).startswith("cls_overhook.")}
+
+
+def has_landmark_head(state_dict: dict) -> bool:
+    """True if a bare state_dict carries the optional landmark head
+    (`conv_kp.*` / `cls_overhook.*`). Like head_from_state_dict, the keys are the
+    only evidence: checkpoints record no architecture metadata. Tolerates the
+    'module.' prefix of DataParallel-saved checkpoints."""
+    for key in state_dict:
+        name = key[len("module."):] if key.startswith("module.") else key
+        if name.startswith(("conv_kp.", "cls_overhook.", "kp_trunk.")):
+            return True
+    return False
+
+
+def landmark_root_from_state_dict(state_dict: dict) -> bool:
+    """True when the landmark head also predicts the collar and root direction
+    (conv_kp has 8 output channels instead of 5; the 10-channel head has it too)."""
+    for name, value in state_dict.items():
+        if name.replace("module.", "", 1) == "conv_kp.weight":
+            return int(value.shape[0]) in (KP_CHANNELS_ROOT, KP_CHANNELS_COTYL)
+    return False
+
+
+def landmark_cotyl_from_state_dict(state_dict: dict) -> bool:
+    """True when the landmark head also predicts the cotyledon base and tip heatmaps
+    (conv_kp has 10 output channels)."""
+    for name, value in state_dict.items():
+        if name.replace("module.", "", 1) == "conv_kp.weight":
+            return int(value.shape[0]) == KP_CHANNELS_COTYL
+    return False
+
+
+def measurable_from_state_dict(state_dict: dict) -> bool:
+    """True when the landmark head also has the image-level "measurable" logit (`cls_measurable.*`):
+    whether an annotator could measure the hook in this crop at all."""
+    return any(k.replace("module.", "", 1).startswith("cls_measurable.") for k in state_dict)
+
+
+def landmark_hidden_from_state_dict(state_dict: dict) -> int:
+    """Width of the optional landmark trunk (`kp_trunk.*`), 0 when the head is the
+    plain 1x1 `conv_kp` straight on the final features."""
+    for name, value in state_dict.items():
+        if name.replace("module.", "", 1).startswith("kp_trunk.0.weight"):
+            return int(value.shape[0])
+    return 0
+
+
 class UNetGNRes(nn.Module):
-    def __init__(self, im_channels=3):
+    def __init__(self, im_channels=3, n_classes=2, head=HEAD_GROUPNORM, landmark_head=False, landmark_hidden=0,
+                 landmark_root=False, landmark_cotyl=False, measurable_head=False):
         super().__init__()
         self.conv_in = nn.Sequential(
             nn.Conv2d(im_channels, 64, kernel_size=3, padding=1),  # padding 0
@@ -122,13 +247,64 @@ class UNetGNRes(nn.Module):
         self.up2 = UpBlock(64)
         self.up3 = UpBlock(64)
         self.up4 = UpBlock(64)
-        self.conv_out = nn.Sequential(
-            nn.Conv2d(64, 2, kernel_size=1, padding=0),
-            nn.ReLU(),
-            nn.GroupNorm(2, 2)
-        )
+        # n_classes defaults to 2 and head defaults to 'groupnorm' so every
+        # existing binary checkpoint (and the GUI, via
+        # models/UNetInference.py) keeps loading unmodified; multi/'s 4-class
+        # training passes n_classes=4, and optionally head='plain'.
+        self.head = head
+        self.conv_out = build_conv_out(n_classes, head)
 
-    def forward(self, x):
+        # Optional landmark head (junction heatmap + direction fields, optionally the
+        # collar and root direction), fed by the same final 64-channel
+        # features as conv_out. It is deliberately NOT part of conv_out /
+        # n_classes: every consumer of the segmentation output (focal alpha,
+        # argmax, softmax) assumes all channels are classes, and a groupnorm
+        # head cannot express a heatmap (it normalises each channel per
+        # image). Absent by default, so every existing checkpoint and the
+        # GUI path (UNetInference builds UNetGNRes() with no arguments) are
+        # unaffected.
+        self.landmark_head = bool(landmark_head)
+        if self.landmark_head:
+            # landmark_hidden > 0 puts a small dilated-conv trunk (receptive field
+            # ~35 px beyond the backbone) between the shared features and the two
+            # landmark outputs. A bare 1x1 on the segmentation features could not
+            # learn junctions or directions (they are class-specific features).
+            self.landmark_hidden = int(landmark_hidden)
+            width = self.landmark_hidden or 64
+            if self.landmark_hidden:
+                layers, in_ch = [], 64
+                for dilation in (1, 2, 4, 8):
+                    layers += [nn.Conv2d(in_ch, width, kernel_size=3, padding=dilation, dilation=dilation),
+                               nn.ReLU(), nn.GroupNorm(32, width)]
+                    in_ch = width
+                self.kp_trunk = nn.Sequential(*layers)
+            self.landmark_cotyl = bool(landmark_cotyl)
+            if self.landmark_cotyl and not landmark_root:
+                raise ValueError("landmark_cotyl needs landmark_root (the channels are stored after the root ones)")
+            self.landmark_root = bool(landmark_root)
+            self.conv_kp = nn.Conv2d(width, KP_CHANNELS_COTYL if self.landmark_cotyl else
+                                     KP_CHANNELS_ROOT if self.landmark_root else KP_CHANNELS,
+                                     kernel_size=1, padding=0)
+            # Start the junction channel at a low prior (sigmoid(-4.6) = 0.01) like
+            # CornerNet/CenterNet. At 0.5 everywhere, the ~63k background pixels of a
+            # 252x252 patch swamp the single peak and the heatmap loss starts about
+            # 270 times the segmentation loss, which wrecks a warm start.
+            with torch.no_grad():
+                self.conv_kp.bias[0] = -4.6
+                if self.landmark_root:
+                    self.conv_kp.bias[5] = -4.6          # collar heatmap, same low prior
+                if self.landmark_cotyl:
+                    self.conv_kp.bias[8] = -4.6          # cotyledon base heatmap
+                    self.conv_kp.bias[9] = -4.6          # cotyledon tip heatmap
+            # Optional image-level "measurable" logit (could an annotator measure the hook here?),
+            # trained on the annotators' skip labels. Average- and max-pooled landmark features, so
+            # a small hook in a large crop is not averaged away. Absent by default: older
+            # checkpoints load and behave unchanged.
+            self.measurable_head = bool(measurable_head)
+            if self.measurable_head:
+                self.cls_measurable = nn.Linear(2 * width, 1)
+
+    def _features(self, x):
         out1 = self.conv_in(x)
         out2 = self.down1(out1)
         out3 = self.down2(out2)
@@ -138,8 +314,64 @@ class UNetGNRes(nn.Module):
         out = self.up2(out, out3)
         out = self.up3(out, out2)
         out = self.up4(out, out1)
-        out = self.conv_out(out)
         return out
+
+    def forward(self, x):
+        return self.conv_out(self._features(x))
+
+    def forward_with_landmarks(self, x, return_measurable=False):
+        """(segmentation logits, landmark maps), plus the (N,) "measurable" logit when
+        return_measurable=True (None for a model without that head). The spatial outputs are the
+        model's raw (16-multiple) size: crop both to the label grid with align_output_to_target."""
+        if not self.landmark_head:
+            raise RuntimeError("this model was built without landmark_head=True")
+        feats = self._features(x)
+        kp_feats = self.kp_trunk(feats) if self.landmark_hidden else feats
+        seg, kp = self.conv_out(feats), self.conv_kp(kp_feats)
+        if not return_measurable:
+            return seg, kp
+        if not getattr(self, "measurable_head", False):
+            return seg, kp, None
+        pooled = torch.cat([kp_feats.mean(dim=(2, 3)), kp_feats.amax(dim=(2, 3))], dim=1)
+        return seg, kp, self.cls_measurable(pooled).squeeze(1)
+
+
+def align_output_to_target(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Center-crop a model's spatial output down to `target`'s spatial size,
+    if they differ.
+
+    UNetGNRes's output is always a multiple of 16 (four MaxPool2d(2) stages
+    -- see above), so it is only ever exactly `input - 2*MARGIN` when `input`
+    is itself in get_valid_patch_sizes()'s family (input % 16 == 12, same
+    residue as the historical IN_SIZE=572). PatchDataset feeds the model
+    `patch_size + 2*MARGIN` (see multi/src/data_loader.py), which shifts
+    that residue, so for every patch_size in that family the model's real
+    output comes back exactly 4px larger (2px/side) than `patch_size` -- a
+    constant, deterministic remainder of the architecture's granularity, not
+    a sizing bug in the dataset. Crop that remainder off the model's own
+    freshly computed output here, right before the loss (the original crash
+    site, multi/train_unet_multiclass.py:65-66 -> this function) -- this
+    never touches or discards any of the label's own hand/pseudo-labelled
+    pixels.
+
+    Raises if `output` is smaller than `target` in either spatial dimension:
+    that would mean PatchDataset's margin was too small for this patch_size,
+    which should never happen with MARGIN imported from
+    models/UNetInference.py, but must fail loudly rather than silently
+    misalign predictions against labels if it ever does.
+    """
+    oh, ow = output.shape[-2:]
+    th, tw = target.shape[-2:]
+    if (oh, ow) == (th, tw):
+        return output
+    if oh < th or ow < tw:
+        raise RuntimeError(
+            f"Model output {oh}x{ow} is smaller than the label {th}x{tw} -- "
+            "PatchDataset's context margin is too small for this patch_size "
+            "(see align_output_to_target's docstring)."
+        )
+    top, left = (oh - th) // 2, (ow - tw) // 2
+    return output[..., top:top + th, left:left + tw]
 
 
 if __name__ == '__main__':

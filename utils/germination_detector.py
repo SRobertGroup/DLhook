@@ -157,6 +157,9 @@ class GerminationDetector:
         diag = self.diagnostics.get(seedling_id)
         if diag is None:
             return f"seedling {seedling_id}: never detected"
+        if diag.get("method") == "learned":
+            probs = ", ".join("?" if p != p else f"{p:.2f}" for p in diag["probs"])
+            return f"seedling {seedling_id}: learned onset frame={diag['frame']} p(radicle)=[{probs}]"
         areas = ", ".join(f"{a:.0f}" for a in diag["areas"])
         verdict = ""
         if diag["frame"] is None:
@@ -170,6 +173,23 @@ class GerminationDetector:
                 f"max_germ_anywhere={diag['max_area_anywhere']:.0f} "
                 f"frames_with_germ={diag['frames_with_any_germ']}/{len(diag['areas'])} "
                 f"areas=[{areas}]{verdict}")
+
+    def record_learned(self, seedling_id, frame_idx, probs):
+        """Store a time-zero found by the learned detector (utils/germination_learned.py,
+        run by models/segmentation_backends.LearnedGerminationRunner) instead of detect().
+        `probs` are its per-frame 'radicle visible' probabilities, kept for describe()."""
+        self.germination_frame[seedling_id] = frame_idx
+        self.diagnostics[seedling_id] = {"method": "learned", "frame": frame_idx, "probs": list(probs)}
+        return frame_idx
+
+    def method(self, seedling_id):
+        """'manual', 'learned', 'rule', or None when nothing is known for this seedling."""
+        if seedling_id in self._overrides:
+            return "manual"
+        diag = self.diagnostics.get(seedling_id)
+        if diag is None:
+            return None
+        return diag.get("method", "rule")
 
     def set_override(self, seedling_id, frame_idx):
         """Manual user override of a detected (or missing) time-zero frame."""

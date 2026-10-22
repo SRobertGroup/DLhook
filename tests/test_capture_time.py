@@ -88,7 +88,7 @@ def test_order_series_uses_capture_time_over_the_filename(tmp_path):
     }
     for name, captured in times.items():
         _write_tiff(tmp_path / name, captured)
-    assert len({filename_sort_key(n) for n in times}) == 1
+    assert sorted(times, key=filename_sort_key) == sorted(times)      # names alone give the wrong order
     assert sorted(times) == ["plate_1_a.tif", "plate_1_b.tif", "plate_1_c.tif"]
 
     ordered, capture_times = order_series(str(tmp_path), sorted(times))
@@ -184,3 +184,47 @@ def test_cancelled_prompt_leaves_elapsed_undetermined():
                                  trust_timestamps=False)
 
     assert deltas[0]["elapsed_minutes"] is None
+
+
+def test_filename_fallback_is_a_natural_sort():
+    """Every number counts: "RPV_16_2" before "RPV_16_10" (the first-number key gave 0, 1, 10, 100, ...)."""
+    names = [f"RPV_16_{i}.jpg" for i in (0, 1, 10, 100, 101, 11, 2, 20, 9)]
+    assert sorted(names, key=filename_sort_key) == [f"RPV_16_{i}.jpg" for i in (0, 1, 2, 9, 10, 11, 20, 100, 101)]
+    assert sorted(["F1 Plate 30010.tif", "F1 Plate 30009.tif"], key=filename_sort_key)[0] == "F1 Plate 30009.tif"
+
+
+def test_one_frame_without_a_timestamp_keeps_the_others(tmp_path):
+    """The Camera_3 / Camera_4 case: one corrupt frame has no timestamp. The series keeps the
+    name order the other timestamps confirm, and the missing time is interpolated."""
+    t0 = datetime.datetime(2026, 7, 8, 15, 23)
+    step = datetime.timedelta(minutes=61)
+    names = [f"RPV_16_{i}.tif" for i in range(12)]
+    for i, name in enumerate(names):
+        _write_tiff(tmp_path / name, None if i == 10 else t0 + i * step)
+
+    ordered, capture_times = order_series(str(tmp_path), sorted(names))
+
+    assert ordered == names
+    assert capture_times["RPV_16_10.tif"] == t0 + 10 * step
+    assert capture_times["RPV_16_3.tif"] == t0 + 3 * step
+    metadata = [{"filename": f, "creation_time": capture_times[f]} for f in ordered]
+    assert metadata_has_gaps(metadata) is False
+
+
+def test_missing_times_at_the_ends_use_the_median_step(tmp_path):
+    t0 = datetime.datetime(2026, 7, 8, 15, 23)
+    step = datetime.timedelta(minutes=61)
+    names = [f"f_{i}.tif" for i in range(5)]
+    for i, name in enumerate(names):
+        _write_tiff(tmp_path / name, None if i in (0, 4) else t0 + i * step)
+    _, capture_times = order_series(str(tmp_path), names)
+    assert capture_times["f_0.tif"] == t0 and capture_times["f_4.tif"] == t0 + 4 * step
+
+
+def test_timestamps_that_contradict_the_names_are_not_interpolated(tmp_path):
+    """When the timed frames do not increase along the name order, nothing is invented."""
+    t0 = datetime.datetime(2026, 7, 8, 15, 23)
+    for name, minutes in (("a_1.tif", 120), ("a_2.tif", None), ("a_3.tif", 0)):
+        _write_tiff(tmp_path / name, None if minutes is None else t0 + datetime.timedelta(minutes=minutes))
+    ordered, capture_times = order_series(str(tmp_path), ["a_3.tif", "a_1.tif", "a_2.tif"])
+    assert ordered == ["a_1.tif", "a_2.tif", "a_3.tif"] and capture_times["a_2.tif"] is None
